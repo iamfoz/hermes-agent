@@ -7840,6 +7840,7 @@ class AIAgent:
             role = "assistant"
             reasoning_parts: list = []
             usage_obj = None
+            last_chunk_repr: Optional[str] = None
             for chunk in stream:
                 last_chunk_time["t"] = time.time()
                 self._touch_activity("receiving stream response")
@@ -7981,6 +7982,27 @@ class AIAgent:
                 # Usage in the final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     usage_obj = chunk.usage
+
+                # Cheap snapshot of every chunk so a missing usage frame
+                # leaves a forensic trail.  model_dump_json keeps the SDK
+                # object faithful; truncated to bound log size.
+                try:
+                    _dump = getattr(chunk, "model_dump_json", None)
+                    last_chunk_repr = _dump()[:600] if callable(_dump) else repr(chunk)[:600]
+                except Exception:
+                    last_chunk_repr = "<unrepr-able chunk>"
+
+            if usage_obj is None:
+                logger.warning(
+                    "stream completed without usage frame — model=%s provider=%s base_url=%s "
+                    "chunks=%s finish_reason=%s last_chunk=%s",
+                    model_name or self.model,
+                    self.provider,
+                    self.base_url,
+                    _diag.get("chunks"),
+                    finish_reason,
+                    last_chunk_repr,
+                )
 
             # Build mock response matching non-streaming shape
             full_content = "".join(content_parts) or None
