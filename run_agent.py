@@ -2158,6 +2158,12 @@ class AIAgent:
             if not isinstance(_custom_providers, list):
                 _custom_providers = []
 
+        try:
+            from agent.concurrency_gate import configure_from_custom_providers
+            configure_from_custom_providers(_custom_providers)
+        except Exception as _cg_err:
+            logger.debug("concurrency_gate configuration skipped: %s", _cg_err)
+
         # Check custom_providers per-model context_length
         if _config_context_length is None and _custom_providers:
             try:
@@ -7406,7 +7412,11 @@ class AIAgent:
         _call_start = time.time()
         self._touch_activity("waiting for non-streaming API response")
 
-        t = threading.Thread(target=_call, daemon=True)
+        def _gated_call():
+            from agent.concurrency_gate import acquire as _gate_acquire
+            with _gate_acquire(self.base_url or self.provider):
+                _call()
+        t = threading.Thread(target=_gated_call, daemon=True)
         t.start()
         _poll_count = 0
         while t.is_alive():
@@ -7734,7 +7744,11 @@ class AIAgent:
                 except Exception as e:
                     result["error"] = e
 
-            t = threading.Thread(target=_bedrock_call, daemon=True)
+            def _gated_bedrock_call():
+                from agent.concurrency_gate import acquire as _gate_acquire
+                with _gate_acquire(self.base_url or self.provider):
+                    _bedrock_call()
+            t = threading.Thread(target=_gated_bedrock_call, daemon=True)
             t.start()
             while t.is_alive():
                 t.join(timeout=0.3)
@@ -8396,7 +8410,11 @@ class AIAgent:
             else:
                 _stream_stale_timeout = _stream_stale_timeout_base
 
-        t = threading.Thread(target=_call, daemon=True)
+        def _gated_call():
+            from agent.concurrency_gate import acquire as _gate_acquire
+            with _gate_acquire(self.base_url or self.provider):
+                _call()
+        t = threading.Thread(target=_gated_call, daemon=True)
         t.start()
         _last_heartbeat = time.time()
         _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches
