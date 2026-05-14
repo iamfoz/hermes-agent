@@ -1354,16 +1354,48 @@ def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
     return _WINDOWS_PATH_WITH_DOT_SEGMENT_RE.sub(_protect, text)
 
 
+def _terminal_width_for_streaming() -> int:
+    """Display cells available inside the streamed response box.
+
+    The streaming path indents every line by ``_STREAM_PAD`` (4 cells)
+    inside an open response panel.  The realigner uses this number as
+    its budget when deciding whether to keep a horizontal table or
+    fall back to vertical key-value rendering.  We subtract a small
+    safety margin so terminal-resize races don't push a borderline
+    table into mid-cell soft-wrap.
+    """
+
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        cols = 80
+    return max(20, cols - len(_STREAM_PAD) - 2)
+
+
 def _render_final_assistant_content(text: str, mode: str = "render"):
     """Render final assistant content as markdown, stripped text, or raw text."""
     from rich.markdown import Markdown
+
+    # Estimate the cells available to the rendered table.  The Panel
+    # used by the background-task / final-response path has 4 cells of
+    # left+right padding plus 1 cell of border on each side, plus the
+    # _STREAM_PAD indent that streamed content uses.  Subtract a small
+    # safety margin so resize races don't push a borderline table into
+    # soft-wrap.
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        cols = 80
+    panel_width = max(20, cols - 12)
 
     normalized_mode = str(mode or "render").strip().lower()
     if normalized_mode == "strip":
         # Strip first — inline markdown inside cells (`code`, **bold**, ~~strike~~)
         # changes cell display width — then re-align so the column padding
         # reflects the final visible text, not the marker-decorated source.
-        return _RichText(realign_markdown_tables(_strip_markdown_syntax(text)))
+        return _RichText(
+            realign_markdown_tables(_strip_markdown_syntax(text), panel_width)
+        )
     if normalized_mode == "raw":
         return _rich_text_from_ansi(text or "")
 
@@ -1374,7 +1406,7 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
     # (narrow panels, etc.) at least see consistent input.
     plain = _rich_text_from_ansi(text or "").plain
     plain = _preserve_windows_dot_segments_for_markdown(plain)
-    plain = realign_markdown_tables(plain)
+    plain = realign_markdown_tables(plain, panel_width)
     return Markdown(plain)
 
 
@@ -2671,9 +2703,27 @@ class HermesCLI:
             pass
 
     def _recover_after_resize(self, app, original_on_resize) -> None:
-        """Recover a resized classic CLI without desynchronizing cursor state."""
-        self._clear_prompt_toolkit_screen(app, rebuild_scrollback=True)
-        _replay_output_history()
+        """Recover a resized classic CLI without desynchronizing cursor state.
+
+        Unlike _force_full_redraw, we do NOT clear the physical screen or
+        scrollback here.  The startup banner and tool summary are printed
+        before prompt_toolkit owns the live chrome, so they live in normal
+        terminal scrollback.  Erasing the screen on SIGWINCH removes that
+        startup UI and ``_replay_output_history`` cannot reconstruct it
+        (the banner was never added to ``_OUTPUT_HISTORY``).
+
+        Instead we just reset prompt_toolkit's renderer cache so the next
+        incremental redraw starts from a clean slate, then let
+        ``original_on_resize`` recalculate layout for the new size.
+        """
+        try:
+            app.renderer.reset(leave_alternate_screen=False)
+        except Exception:
+            pass
+        try:
+            app.invalidate()
+        except Exception:
+            pass
         original_on_resize()
 
     def _schedule_resize_recovery(self, app, original_on_resize, delay: float = 0.12) -> None:
@@ -3637,7 +3687,7 @@ class HermesCLI:
             if self.show_timestamps:
                 label = f"{label} {datetime.now().strftime('%H:%M')}"
             w = shutil.get_terminal_size().columns
-            fill = w - 2 - len(label)
+            fill = w - 2 - HermesCLI._status_bar_display_width(label)
             _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
 
         self._stream_buf += text
@@ -3662,7 +3712,7 @@ class HermesCLI:
             joined = "\n".join(buf)
             if self.final_response_markdown == "strip":
                 joined = _strip_markdown_syntax(joined)
-            block = realign_markdown_tables(joined)
+            block = realign_markdown_tables(joined, _terminal_width_for_streaming())
             for ln in block.split("\n"):
                 _emit_one(ln)
 
@@ -3726,7 +3776,7 @@ class HermesCLI:
             self._in_stream_table = False
             if self.final_response_markdown == "strip":
                 joined = _strip_markdown_syntax(joined)
-            block = realign_markdown_tables(joined)
+            block = realign_markdown_tables(joined, _terminal_width_for_streaming())
             for ln in block.split("\n"):
                 _cprint(f"{_STREAM_PAD}{_tc}{ln}{_RST}" if _tc else f"{_STREAM_PAD}{ln}")
 
@@ -4182,12 +4232,34 @@ class HermesCLI:
             ChatConsole().print(f"[bold red]Failed to initialize agent: {e}[/]")
             return False
     
+    def _show_security_advisories(self):
+        """Show a startup banner if any unacked security advisories match.
+
+        Renders a single bold-red box on stderr (so piped stdout remains
+        clean) listing the worst hit and pointing at ``hermes doctor``.
+        Banner-cache rate-limits this to once per 24h per advisory; full
+        remediation lives behind ``hermes doctor`` so the banner stays
+        small.
+        """
+        try:
+            from hermes_cli.security_advisories import (
+                detect_compromised,
+                startup_banner,
+            )
+            hits = detect_compromised()
+            banner = startup_banner(hits)
+            if banner:
+                # Print to stderr — keeps stdout clean for piped automation,
+                # and Rich's banner rendering already wrote to stdout above.
+                print(banner, file=sys.stderr, flush=True)
+        except Exception:
+            # Never let the security banner block startup. Failures are
+            # logged at DEBUG by the advisory module.
+            pass
+
     def show_banner(self):
         """Display the welcome banner in Claude Code style."""
         self.console.clear()
-
-        # Get context length for display before branching so it remains
-        # available to the low-context warning logic in compact mode too.
         ctx_len = None
         if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
             ctx_len = self.agent.context_compressor.context_length
@@ -6542,7 +6614,7 @@ class HermesCLI:
           /model <name> --provider <provider> — switch provider + model
           /model --provider <provider>        — switch to provider, auto-detect model
         """
-        from hermes_cli.model_switch import switch_model, parse_model_flags, list_authenticated_providers
+        from hermes_cli.model_switch import switch_model, parse_model_flags
         from hermes_cli.providers import get_label
 
         # Parse args from the original command
@@ -6552,16 +6624,25 @@ class HermesCLI:
         # Parse --provider and --global flags
         model_input, explicit_provider, persist_global = parse_model_flags(raw_args)
 
-        # Load providers for switch_model (picker path needs them below)
-        user_provs = None
-        custom_provs = None
+        # Single inventory context — replaces the inline config-slice the
+        # dashboard / TUI used to duplicate. Overlay live session state
+        # via with_overrides (truthy-only) so empty self.* attrs don't
+        # clobber disk config.
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
         try:
-            from hermes_cli.config import get_compatible_custom_providers, load_config
-            cfg = load_config()
-            user_provs = cfg.get("providers")
-            custom_provs = get_compatible_custom_providers(cfg)
+            ctx = load_picker_context().with_overrides(
+                current_provider=self.provider or "",
+                current_model=self.model or "",
+                current_base_url=self.base_url or "",
+            )
         except Exception:
-            pass
+            ctx = None
+
+        # switch_model() + _open_model_picker still need the raw provider
+        # dicts; ConfigContext is the canonical source for both.
+        user_provs = ctx.user_providers if ctx is not None else None
+        custom_provs = ctx.custom_providers if ctx is not None else None
 
         # No args at all: open prompt_toolkit-native picker modal
         if not model_input and not explicit_provider:
@@ -6569,14 +6650,9 @@ class HermesCLI:
             provider_display = get_label(self.provider) if self.provider else "unknown"
 
             try:
-                providers = list_authenticated_providers(
-                    current_provider=self.provider or "",
-                    current_base_url=self.base_url or "",
-                    current_model=self.model or "",
-                    user_providers=user_provs,
-                    custom_providers=custom_provs,
-                    max_models=50,
-                )
+                if ctx is None:
+                    raise RuntimeError("inventory context unavailable")
+                providers = build_models_payload(ctx, max_models=50)["providers"]
             except Exception:
                 providers = []
 
@@ -6701,6 +6777,46 @@ class HermesCLI:
             _cprint("    Saved to config.yaml (--global)")
         else:
             _cprint("    (session only — add --global to persist)")
+
+    def _handle_codex_runtime(self, cmd_original: str) -> None:
+        """Handle /codex-runtime — toggle the codex app-server runtime opt-in.
+
+        Usage:
+            /codex-runtime                       — show current state
+            /codex-runtime auto                  — Hermes default (chat_completions)
+            /codex-runtime codex_app_server      — hand turns to codex subprocess
+            /codex-runtime on / off              — synonyms for the above
+        """
+        from hermes_cli import codex_runtime_switch as crs
+
+        parts = cmd_original.split(None, 1)
+        raw_args = parts[1].strip() if len(parts) > 1 else ""
+        new_value, errors = crs.parse_args(raw_args)
+        if errors:
+            for err in errors:
+                _cprint(f"❌ {err}")
+            return
+
+        # Load + persist via the existing config helpers
+        try:
+            from hermes_cli.config import load_config, save_config
+        except Exception as exc:
+            _cprint(f"❌ could not load config: {exc}")
+            return
+        cfg = load_config()
+
+        result = crs.apply(
+            cfg,
+            new_value,
+            persist_callback=(save_config if new_value is not None else None),
+        )
+
+        prefix = "✓" if result.success else "✗"
+        for line in result.message.splitlines():
+            _cprint(f"  {prefix} {line}" if line.startswith("openai_runtime")
+                    else f"    {line}")
+        if result.success and result.requires_new_session:
+            _cprint("    Tip: `/reset` starts a new session immediately.")
 
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
@@ -7382,6 +7498,8 @@ class HermesCLI:
             self._handle_resume_command(cmd_original)
         elif canonical == "model":
             self._handle_model_switch(cmd_original)
+        elif canonical == "codex-runtime":
+            self._handle_codex_runtime(cmd_original)
         elif canonical == "gquota":
             self._handle_gquota_command(cmd_original)
 
@@ -7529,6 +7647,8 @@ class HermesCLI:
                 _cprint(f"  No agent running; queued as next turn: {payload[:80]}{'...' if len(payload) > 80 else ''}")
         elif canonical == "goal":
             self._handle_goal_command(cmd_original)
+        elif canonical == "subgoal":
+            self._handle_subgoal_command(cmd_original)
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
@@ -7546,6 +7666,8 @@ class HermesCLI:
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
                         try:
+                            # shell=True is intentional: quick_commands are user-defined
+                            # shell snippets from config.yaml — not agent/LLM controlled.
                             result = subprocess.run(
                                 exec_cmd, shell=True, capture_output=True,
                                 text=True, timeout=30
@@ -8125,6 +8247,81 @@ class HermesCLI:
         except Exception:
             pass
 
+    def _handle_subgoal_command(self, cmd: str) -> None:
+        """Dispatch /subgoal subcommands.
+
+        Forms:
+          /subgoal                              show current subgoals
+          /subgoal <text>                       append a criterion
+          /subgoal remove <n>                   drop subgoal n (1-based)
+          /subgoal clear                        wipe all subgoals
+
+        Subgoals are extra criteria the user adds mid-loop. They get
+        appended to both the judge prompt (verdict must consider them)
+        and the continuation prompt (agent sees them) on the next turn
+        boundary. No special kick — the running turn finishes, the next
+        judge call includes them.
+        """
+        parts = (cmd or "").strip().split(None, 2)
+        arg = " ".join(parts[1:]).strip() if len(parts) > 1 else ""
+
+        mgr = self._get_goal_manager()
+        if mgr is None:
+            _cprint(f"  {_DIM}Goals unavailable (no active session).{_RST}")
+            return
+
+        if not mgr.has_goal():
+            _cprint(f"  {_DIM}No active goal. Set one with /goal <text>.{_RST}")
+            return
+
+        # No args → list current subgoals.
+        if not arg:
+            _cprint(f"  {mgr.status_line()}")
+            _cprint(f"  {mgr.render_subgoals()}")
+            return
+
+        tokens = arg.split(None, 1)
+        verb = tokens[0].lower()
+        rest = tokens[1].strip() if len(tokens) > 1 else ""
+
+        if verb == "remove":
+            if not rest:
+                _cprint("  Usage: /subgoal remove <n>")
+                return
+            try:
+                idx = int(rest.split()[0])
+            except ValueError:
+                _cprint("  /subgoal remove: <n> must be an integer (1-based index).")
+                return
+            try:
+                removed = mgr.remove_subgoal(idx)
+            except (IndexError, RuntimeError) as exc:
+                _cprint(f"  /subgoal remove: {exc}")
+                return
+            _cprint(f"  ✓ Removed subgoal {idx}: {removed}")
+            return
+
+        if verb == "clear":
+            try:
+                prev = mgr.clear_subgoals()
+            except RuntimeError as exc:
+                _cprint(f"  /subgoal clear: {exc}")
+                return
+            if prev:
+                _cprint(f"  ✓ Cleared {prev} subgoal{'s' if prev != 1 else ''}.")
+            else:
+                _cprint(f"  {_DIM}No subgoals to clear.{_RST}")
+            return
+
+        # Otherwise — append the whole arg as a new subgoal.
+        try:
+            text = mgr.add_subgoal(arg)
+        except (ValueError, RuntimeError) as exc:
+            _cprint(f"  /subgoal: {exc}")
+            return
+        idx = len(mgr.state.subgoals) if mgr.state else 0
+        _cprint(f"  ✓ Added subgoal {idx}: {text}")
+
     def _maybe_continue_goal_after_turn(self) -> None:
         """Hook run after every CLI turn. Judges + maybe re-queues.
 
@@ -8151,10 +8348,36 @@ class HermesCLI:
 
         # If a real user message is already queued, don't inject a
         # continuation prompt on top — let the user's turn go first.
+        # Slash commands don't count as "real user messages" for this
+        # check: they're inspection/mutation (e.g. /subgoal added mid-
+        # run) and the process_loop dispatches them via process_command,
+        # not via chat(). If we treat a queued /subgoal as preempting,
+        # the goal loop silently stalls — we'd return here, then the
+        # slash command consumes its queue slot via process_command()
+        # which never re-fires the goal hook. Peek at all queued entries
+        # and only defer when there's a non-slash payload.
         try:
-            if getattr(self, "_pending_input", None) is not None \
-                    and not self._pending_input.empty():
-                return
+            pending = getattr(self, "_pending_input", None)
+            if pending is not None and not pending.empty():
+                has_real_message = False
+                try:
+                    # Queue.queue is the underlying deque — direct peek
+                    # without disturbing FIFO order.
+                    for entry in list(pending.queue):
+                        # Bundled payloads are (text, images) tuples;
+                        # unpack for inspection.
+                        if isinstance(entry, tuple) and entry:
+                            entry = entry[0]
+                        if isinstance(entry, str) and _looks_like_slash_command(entry):
+                            continue
+                        has_real_message = True
+                        break
+                except Exception:
+                    # Fallback: if we can't introspect the queue, behave
+                    # like the old check and defer to be safe.
+                    has_real_message = True
+                if has_real_message:
+                    return
         except Exception:
             pass
 
@@ -8770,6 +8993,9 @@ class HermesCLI:
             elif parts[i] == "--source" and i + 1 < len(parts):
                 source = parts[i + 1]
                 i += 2
+            elif parts[i].isdigit():
+                days = int(parts[i])
+                i += 1
             else:
                 i += 1
 
@@ -9857,7 +10083,7 @@ class HermesCLI:
         import time as _time
 
         with self._approval_lock:
-            timeout = 60
+            timeout = int(CLI_CONFIG.get("approvals", {}).get("timeout", 60))
             response_queue = queue.Queue()
 
             self._approval_state = {
@@ -10355,7 +10581,7 @@ class HermesCLI:
                         label = " ⚕ Hermes "
                         if self.show_timestamps:
                             label = f"{label}{datetime.now().strftime('%H:%M')} "
-                        fill = w - 2 - len(label)
+                        fill = w - 2 - HermesCLI._status_bar_display_width(label)
                         _cprint(f"\n{_ACCENT}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
                     _cprint(f"{_STREAM_PAD}{sentence.rstrip()}")
 
@@ -11003,10 +11229,9 @@ class HermesCLI:
             pass
 
         self.show_banner()
-
-        # One-line Honcho session indicator (TTY-only, not captured by agent).
-        # Only show when the user explicitly configured Honcho for Hermes
-        # (not auto-enabled from a stray HONCHO_API_KEY env var).
+        # Surface any active supply-chain security advisories right after the
+        # welcome banner. Quiet/single-query paths call this themselves.
+        self._show_security_advisories()
         # If resuming a session, load history and display it immediately
         # so the user has context before typing their first message.
         if self._resumed:
@@ -13515,6 +13740,9 @@ def main(
             _query_label = query or ("[image attached]" if single_query_images else "")
             if _query_label:
                 cli.console.print(f"[bold blue]Query:[/] {_query_label}")
+            # Surface security advisories before the agent runs — short
+            # banner, doesn't depend on the welcome banner being shown.
+            cli._show_security_advisories()
             cli.chat(query, images=single_query_images or None)
             cli._print_exit_summary()
         return
