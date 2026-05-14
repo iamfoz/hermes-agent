@@ -1950,6 +1950,24 @@ class AIAgent:
             _agent_cfg = _load_agent_config()
         except Exception:
             _agent_cfg = {}
+
+        # Adaptive context window: observe response.model after each LLM
+        # call and re-budget the compressor when the upstream router
+        # resolves to a different backend (e.g. openrouter/auto picking
+        # Llama-3.3-70B one call and Qwen-2.5 the next, each with a
+        # different context_length). Off by default.
+        _compression_cfg_for_adapt = _agent_cfg.get("compression", {}) or {}
+        self._adaptive_context_enabled = bool(
+            _compression_cfg_for_adapt.get("adaptive_context_window", False)
+        )
+        self._adaptive_context = None
+        if self._adaptive_context_enabled:
+            try:
+                from agent.adaptive_context import AdaptiveContextTracker
+                self._adaptive_context = AdaptiveContextTracker()
+            except Exception as _ace_err:
+                logger.debug("adaptive_context_window: init failed (%s)", _ace_err)
+                self._adaptive_context_enabled = False
         try:
             self._tool_guardrails = ToolCallGuardrailController(
                 ToolCallGuardrailConfig.from_mapping(
@@ -5736,6 +5754,15 @@ class AIAgent:
         if not (self._memory_manager and final_response and original_user_message):
             return
         try:
+            # Notify providers which prefetched memories the response
+            # actually referenced (per-provider heuristic). Fires BEFORE
+            # sync_all so providers can credit recalls before persisting
+            # the new turn — which keeps the recall-credit signal
+            # separate from the new-memory-creation signal.
+            self._memory_manager.notify_recall_used(
+                final_response,
+                session_id=self.session_id or "",
+            )
             self._memory_manager.sync_all(
                 original_user_message, final_response,
                 session_id=self.session_id or "",
@@ -10908,6 +10935,18 @@ class AIAgent:
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
+            # Notify memory providers (parallel-tool-call path). Best-effort.
+            if self._memory_manager is not None:
+                try:
+                    self._memory_manager.notify_tool_call(
+                        function_name,
+                        function_args if isinstance(function_args, dict) else {},
+                        result,
+                        session_id=self.session_id or "",
+                        success=not is_error,
+                    )
+                except Exception:
+                    pass
             results[index] = (function_name, function_args, result, duration, is_error, False)
             # Tear down worker-tid tracking.  Clear any interrupt bit we may
             # have set so the next task scheduled onto this recycled tid
@@ -11451,6 +11490,21 @@ class AIAgent:
             # Log tool errors to the persistent error log so [error] tags
             # in the UI always have a corresponding detailed entry on disk.
             _is_error_result, _ = _detect_tool_failure(function_name, function_result)
+
+            # Notify memory providers of the tool call (any tool, not just
+            # provider-owned). Best-effort; failures don't disturb the dispatch.
+            if self._memory_manager is not None:
+                try:
+                    self._memory_manager.notify_tool_call(
+                        function_name,
+                        function_args if isinstance(function_args, dict) else {},
+                        function_result,
+                        session_id=self.session_id or "",
+                        success=not _is_error_result,
+                    )
+                except Exception:
+                    pass
+
             if not _execution_blocked:
                 function_result = self._append_guardrail_observation(
                     function_name,
@@ -12217,10 +12271,31 @@ class AIAgent:
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
         _ext_prefetch_cache = ""
+        # Per-turn dynamic system-prompt context from providers that override
+        # `before_prompt_build`. This is the new (memory-context-as-system-
+        # prompt) injection path; providers that haven't migrated stay on
+        # the user-message path via `prefetch_all`.
+        _ext_system_prompt_cache = ""
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
                 _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+            except Exception:
+                pass
+            try:
+                _turn_state = {
+                    "query": _query if isinstance(original_user_message, str) else "",
+                    "session_id": self.session_id or "",
+                    "parent_session_id": self._parent_session_id or "",
+                    "turn_number": self._user_turn_count,
+                    "model": getattr(self, "model", "") or "",
+                    "platform": getattr(self, "platform", "") or "",
+                    "agent_id": getattr(self, "agent_identity", "") or "",
+                }
+                _ext_system_prompt_cache = (
+                    self._memory_manager.build_dynamic_system_prompt(_turn_state)
+                    or ""
+                )
             except Exception:
                 pass
 
@@ -12386,11 +12461,28 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
+                # Inject per-turn dynamic memory-provider context into the
+                # SYSTEM prompt for providers that override before_prompt_build.
+                # This is the new (memory-context-as-system-prompt) path —
+                # providers that prefer it get their context placed where the
+                # LLM treats it as authoritative agent context, not as
+                # user-supplied input. The original `messages` is never
+                # mutated; only api_msg gets the injection per-iteration.
+                if idx == 0 and msg.get("role") == "system" and _ext_system_prompt_cache:
+                    _fenced_sys = build_memory_context_block(_ext_system_prompt_cache)
+                    if _fenced_sys:
+                        _base_sys = api_msg.get("content", "")
+                        if isinstance(_base_sys, str):
+                            api_msg["content"] = _base_sys + "\n\n" + _fenced_sys
+
                 # Inject ephemeral context into the current turn's user message.
                 # Sources: memory manager prefetch + plugin pre_llm_call hooks
                 # with target="user_message" (the default).  Both are
                 # API-call-time only — the original message in `messages` is
                 # never mutated, so nothing leaks into session persistence.
+                # Note: providers that override before_prompt_build are skipped
+                # by prefetch_all (above), so _ext_prefetch_cache only contains
+                # output from legacy providers using the user-message path.
                 if idx == current_turn_user_idx and msg.get("role") == "user":
                     _injections = []
                     if _ext_prefetch_cache:
@@ -12723,7 +12815,36 @@ class AIAgent:
                         # Log response with provider info if available
                         resp_model = getattr(response, 'model', 'N/A') if response else 'N/A'
                         logging.debug(f"API Response received - Model: {resp_model}, Usage: {response.usage if hasattr(response, 'usage') else 'N/A'}")
-                    
+
+                    # Adaptive context window: if the router picked a
+                    # different backend this call, rebudget the compressor
+                    # to the new backend's context_length.
+                    if self._adaptive_context is not None and response is not None:
+                        try:
+                            _new_model = self._adaptive_context.observe(
+                                getattr(response, "model", None)
+                            )
+                            if _new_model:
+                                from agent.model_metadata import get_model_context_length
+                                _new_ctx = get_model_context_length(
+                                    _new_model,
+                                    base_url=self.base_url,
+                                    api_key=getattr(self, "api_key", ""),
+                                    provider=self.provider,
+                                )
+                                _cc = getattr(self, "context_compressor", None)
+                                if _cc is not None and _new_ctx:
+                                    _cc.update_model(
+                                        model=_new_model,
+                                        context_length=_new_ctx,
+                                        base_url=self.base_url,
+                                        api_key=getattr(self, "api_key", ""),
+                                        provider=self.provider,
+                                        api_mode=self.api_mode,
+                                    )
+                        except Exception as _ace_loop:
+                            logger.debug("adaptive-context observe failed: %s", _ace_loop)
+
                     # Validate response shape before proceeding
                     response_invalid = False
                     error_details = []
