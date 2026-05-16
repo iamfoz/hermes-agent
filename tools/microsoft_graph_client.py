@@ -48,7 +48,7 @@ class MicrosoftGraphClient:
 
     def __init__(
         self,
-        token_provider: MicrosoftGraphTokenProvider,
+        token_provider: Any,
         *,
         base_url: str = DEFAULT_GRAPH_BASE_URL,
         timeout: float = 60.0,
