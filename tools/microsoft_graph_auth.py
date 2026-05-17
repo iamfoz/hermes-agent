@@ -9,7 +9,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, Union
 
 import httpx
 
@@ -303,7 +303,7 @@ class MicrosoftGraphTokenProvider:
         )
 
 
-DeviceCodeCallback = Callable[[str, str], Coroutine[Any, Any, None] | None] | Callable[[str, str], None]
+DeviceCodeCallback = Union[Callable[[str, str], Union[Coroutine[Any, Any, None], None]], Callable[[str, str], None]]
 """Callback signature for displaying device code to the user.
 
 Takes (verification_uri, user_code). Can be async or sync.
