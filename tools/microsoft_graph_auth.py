@@ -397,7 +397,7 @@ class MicrosoftGraphDelegatedTokenProvider:
 
             # 2. Try file cache (shared with parallel cron jobs)
             if not force_refresh:
-                file_token = await self._load_token_from_file()
+                file_token = self._load_token_from_file()
                 if file_token is not None:
                     self._cached_token = file_token
                     if not file_token.is_expired(skew_seconds=self.skew_seconds):
