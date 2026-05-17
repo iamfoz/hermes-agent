@@ -4110,6 +4110,13 @@ def run_conversation(
                         }
                 
                 # Track actual token usage from response for context management
+                # A successful response always counts toward session_api_calls,
+                # even if the upstream omitted usage data (some streaming SSE
+                # shims drop the final usage frame). Gating the increment on
+                # `response.usage` made /usage's token bookkeeping appear
+                # frozen at zero forever in that case.
+                agent.session_api_calls += 1
+
                 if hasattr(response, 'usage') and response.usage:
                     canonical_usage = normalize_usage(
                         response.usage,
@@ -4250,7 +4257,6 @@ def run_conversation(
                     agent.session_prompt_tokens += prompt_tokens
                     agent.session_completion_tokens += completion_tokens
                     agent.session_total_tokens += total_tokens
-                    agent.session_api_calls += 1
                     agent.session_input_tokens += canonical_usage.input_tokens
                     agent.session_output_tokens += canonical_usage.output_tokens
                     agent.session_cache_read_tokens += canonical_usage.cache_read_tokens
