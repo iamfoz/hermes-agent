@@ -2784,6 +2784,35 @@ class AIAgent:
                 msg = AIAgent._coerce_api_error_detail(msg)
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
+        # jmunch-mcp gateway: SSE-streamed error with embedded JSON.
+        # The raw error string contains "data: {" lines — extract the error
+        # object to surface the real upstream error (e.g., "upstream airouter
+        # returned 429") instead of an opaque "HTTP 502: data: {...}".
+        if "data:" in raw and ("UPSTREAM_ERROR" in raw or '"code"' in raw):
+            for line in raw.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        parsed = json.loads(line[6:])
+                        if isinstance(parsed, dict) and "error" in parsed:
+                            err = parsed["error"]
+                            if isinstance(err, dict):
+                                upstream_status = err.get("detail", {}).get("status", "")
+                                msg = err.get("message", "")
+                                upstream_code = err.get("code", "")
+                                parts = []
+                                if upstream_status:
+                                    parts.append(f"upstream returned HTTP {upstream_status}")
+                                if msg:
+                                    parts.append(msg[:300])
+                                status_code = getattr(error, "status_code", None)
+                                prefix = f"HTTP {status_code}: " if status_code else ""
+                                result = f"{prefix}{'; '.join(parts) if parts else msg[:300]}"
+                                if upstream_code and upstream_code not in result:
+                                    result = f"{result} ({upstream_code})"
+                                return result
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+
         # SDK may leave body empty while httpx still has the payload (#36109).
         # Redact before returning: the raw provider/proxy error body is
         # attacker-influenced and may echo Authorization / x-api-key / request
