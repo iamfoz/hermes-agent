@@ -205,6 +205,167 @@ def _homeassistant_credentials_present() -> bool:
     except Exception:
         return False
 
+
+# ─── Toolset Presets ──────────────────────────────────────────────────────────
+#
+# Named bundles of (enabled_toolsets, disabled_toolsets, skills) that layer
+# on top of the per-platform tool configuration. Activated via the
+# ``/toolset <name>`` slash command, the ``--toolset <name>`` CLI flag, or
+# by setting ``active_preset`` in ~/.hermes/config.yaml. Presets restrict
+# the tool surface area per task type (email triage, research, writing,
+# coding) without fragmenting memory, config, or skills the way profiles do.
+#
+# Skill grouping is delegated to upstream's skill-bundles feature
+# (``agent.skill_bundles``, ``hermes_cli.bundles``, PR #28373). A preset
+# references one skill bundle by name via the ``bundle:`` key; ``resolve_preset``
+# expands that bundle's ``skills`` list and merges it with any preset-level
+# ``preload_skills`` extras (deduped, first-seen order preserved).
+#
+# Why a separate concept from bundles:
+#   - Bundles answer "what skills go together?"   (skill-set composition)
+#   - Presets answer  "what work mode am I in?"  (tool surface + skills +
+#                                                  sticky mode + auto-/new)
+# Presets gate the *tool surface* (which bundles do not), live in one
+# config.yaml (vs. one YAML per bundle), and have a sticky/active concept
+# (vs. invocation-time loading). The two compose cleanly: a preset names
+# its bundle; the bundle names its skills.
+#
+# See website/docs/user-guide/features/toolset-presets.md for the full
+# spec, design rationale, and migration notes.
+
+
+def resolve_preset(
+    name: str,
+    cfg: dict,
+) -> tuple[list[str] | None, list[str], list[str]]:
+    """Resolve a named preset to (enabled_toolsets, disabled_toolsets, skills).
+
+    Args:
+        name: The preset key under ``toolset_presets`` in config.yaml.
+        cfg: The loaded config dict.
+
+    Returns:
+        enabled_toolsets: ``None`` when the preset doesn't whitelist tools
+            (full toolset, filtered by platform config); otherwise a list
+            of toolset names to whitelist.
+        disabled_toolsets: list of toolset names to exclude (always applied,
+            even when no whitelist).
+        skills: Final list of skill names to load on session activation,
+            composed from the preset's referenced bundle (``preset.bundle``)
+            plus any preset-level ``preload_skills`` extras. Deduped; first
+            occurrence wins (bundle skills appear before extras).
+
+    Unknown preset names return ``(None, [], [])`` - callers should check
+    whether the name exists in ``cfg["toolset_presets"]`` first if they
+    want to surface a "preset not found" message.
+
+    Unknown bundle names log a warning and skip the bundle layer (the
+    preset's ``preload_skills`` extras and tool-surface gating still
+    apply). A preset is never failed by a missing bundle - the tool
+    surface is independently valuable.
+    """
+    presets = (cfg or {}).get("toolset_presets") or {}
+    preset = presets.get(name)
+    if not isinstance(preset, dict):
+        return None, [], []
+
+    enabled_raw = preset.get("toolsets") or []
+    # Convention: omit key or empty list → None (no restriction).
+    # Non-empty list → whitelist.
+    enabled: list[str] | None
+    if isinstance(enabled_raw, list) and enabled_raw:
+        enabled = [str(t).strip() for t in enabled_raw if str(t).strip()]
+        if not enabled:
+            enabled = None
+    else:
+        enabled = None
+
+    disabled_raw = preset.get("disabled_toolsets") or []
+    disabled: list[str] = []
+    if isinstance(disabled_raw, list):
+        disabled = [str(t).strip() for t in disabled_raw if str(t).strip()]
+
+    # ── Skill composition: bundle.skills + preload_skills extras ──
+    # Bundle reference resolves through upstream's skill_bundles module
+    # (PR #28373). It owns the YAML schema and on-disk format; presets
+    # just borrow the skill list. If the bundle has an ``instruction:``,
+    # callers can fetch it separately via ``preset_bundle_instruction``.
+    skills: list[str] = []
+    seen: set[str] = set()
+    bundle_name = str(preset.get("bundle") or "").strip()
+    if bundle_name:
+        try:
+            from agent.skill_bundles import get_bundle
+            bundle = get_bundle(bundle_name)
+        except ImportError:
+            # agent module unavailable (e.g. minimal CLI install) - 
+            # fall back to extras-only behaviour rather than crashing.
+            bundle = None
+        if bundle is None:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "Toolset preset %r references unknown skill bundle %r - "
+                "the preset's tool-surface gating still applies, but no "
+                "bundle skills will be loaded. Create the bundle with "
+                "``hermes bundles create %s --skill <name> ...`` or remove "
+                "the ``bundle:`` field from the preset.",
+                name, bundle_name, bundle_name,
+            )
+        else:
+            for s in (bundle.get("skills") or []):
+                s = str(s).strip()
+                if s and s not in seen:
+                    skills.append(s)
+                    seen.add(s)
+
+    preload_raw = preset.get("preload_skills") or []
+    if isinstance(preload_raw, list):
+        for s in preload_raw:
+            s = str(s).strip()
+            if s and s not in seen:
+                skills.append(s)
+                seen.add(s)
+
+    return enabled, disabled, skills
+
+
+def preset_bundle_instruction(name: str, cfg: dict) -> str:
+    """Return the ``instruction:`` text from the preset's referenced bundle.
+
+    Empty string when the preset doesn't reference a bundle, the bundle
+    doesn't exist, or the bundle has no instruction. Caller-facing
+    helper for surfaces (CLI/gateway) that want to inject the bundle's
+    instruction text at session activation.
+    """
+    presets = (cfg or {}).get("toolset_presets") or {}
+    preset = presets.get(name)
+    if not isinstance(preset, dict):
+        return ""
+    bundle_name = str(preset.get("bundle") or "").strip()
+    if not bundle_name:
+        return ""
+    try:
+        from agent.skill_bundles import get_bundle
+        bundle = get_bundle(bundle_name)
+    except ImportError:
+        return ""
+    if not bundle:
+        return ""
+    return str(bundle.get("instruction") or "").strip()
+
+
+def list_presets(cfg: dict) -> dict[str, dict]:
+    """Return the configured presets dict, or ``{}`` when none are defined."""
+    presets = (cfg or {}).get("toolset_presets") or {}
+    return presets if isinstance(presets, dict) else {}
+
+
+def get_active_preset(cfg: dict) -> str:
+    """Return the currently active preset name, or "" if none is active."""
+    raw = (cfg or {}).get("active_preset") or ""
+    return str(raw).strip()
+
+
 # Platform-scoped toolsets: only appear in the `hermes tools` checklist for
 # these platforms, and only resolve/save for these platforms.  A toolset
 # absent from this map is available on every platform (current behaviour).

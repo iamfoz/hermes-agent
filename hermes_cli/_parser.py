@@ -217,6 +217,12 @@ def build_top_level_parser():
         help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.",
     )
     parser.add_argument(
+        "--toolset",
+        metavar="NAME",
+        default=None,
+        help="Activate a named toolset preset (defined under `toolset_presets:` in config.yaml) for this invocation. Overrides the sticky active_preset.",
+    )
+    parser.add_argument(
         "--resume",
         "-r",
         metavar="SESSION",
@@ -398,6 +404,12 @@ def build_top_level_parser():
             "high, xhigh, max, or ultra. Overrides agent.reasoning_effort for "
             "this run only (same levels as the /reasoning slash command)."
         ),
+    )
+    chat_parser.add_argument(
+        "--toolset",
+        metavar="NAME",
+        default=argparse.SUPPRESS,
+        help="Activate a toolset preset (e.g. email, research). Overrides the sticky active_preset for this invocation.",
     )
     _inherited_flag(
         chat_parser,
