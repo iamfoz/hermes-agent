@@ -214,3 +214,34 @@ def test_env_platform_connect_timeout_wins_over_config(hermes_home: Path) -> Non
     )
 
     assert env.get("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT") == "120"
+
+
+def test_busy_text_mode_inherits_from_busy_input_mode(hermes_home: Path) -> None:
+    """When ``busy_text_mode`` isn't set but ``busy_input_mode`` is, the
+    bridge propagates the parent value to the text env var so the
+    platform adapter's hardcoded "queue" default can't silently override
+    the user's choice.
+
+    Regression: introducing a separate ``busy_text_mode`` knob made
+    text follow-ups always queue regardless of the parent
+    ``busy_input_mode`` setting, dropping the interrupt notification
+    users had configured for everything.
+    """
+    _write_config(hermes_home, display_cfg={"busy_input_mode": "interrupt"})
+    env = _run_gateway_import(hermes_home, initial_env={})
+    assert env.get("HERMES_GATEWAY_BUSY_INPUT_MODE") == "interrupt"
+    assert env.get("HERMES_GATEWAY_BUSY_TEXT_MODE") == "interrupt"
+
+
+def test_busy_text_mode_explicit_value_overrides_inheritance(hermes_home: Path) -> None:
+    """An explicit ``busy_text_mode`` config wins over inheritance from
+    ``busy_input_mode``. Users who want text-specific queuing while
+    keeping interrupt for other inputs can still opt in.
+    """
+    _write_config(
+        hermes_home,
+        display_cfg={"busy_input_mode": "interrupt", "busy_text_mode": "queue"},
+    )
+    env = _run_gateway_import(hermes_home, initial_env={})
+    assert env.get("HERMES_GATEWAY_BUSY_INPUT_MODE") == "interrupt"
+    assert env.get("HERMES_GATEWAY_BUSY_TEXT_MODE") == "queue"

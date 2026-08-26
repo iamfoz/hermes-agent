@@ -2510,6 +2510,16 @@ if _config_path.exists():
                 os.environ["HERMES_GATEWAY_BUSY_INPUT_MODE"] = str(_display_cfg["busy_input_mode"])
             if "busy_text_mode" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_text_mode"])
+            elif "busy_input_mode" in _display_cfg:
+                # No explicit ``busy_text_mode``, so inherit from the parent
+                # ``busy_input_mode``. Without this, the platform adapter's
+                # ``_busy_text_mode`` default (hardcoded "queue") would
+                # override a user who picked ``busy_input_mode: interrupt``
+                # for everything and expected text follow-ups to interrupt
+                # too. Users who want text-specific queuing while keeping
+                # interrupt for other inputs can still set ``busy_text_mode``
+                # explicitly.
+                os.environ["HERMES_GATEWAY_BUSY_TEXT_MODE"] = str(_display_cfg["busy_input_mode"])
             if "busy_ack_enabled" in _display_cfg:
                 os.environ["HERMES_GATEWAY_BUSY_ACK_ENABLED"] = str(_display_cfg["busy_ack_enabled"])
             # This process-level env var is documented as an override for
