@@ -37,6 +37,7 @@ import importlib.metadata
 import importlib.util
 import logging
 import sys
+import warnings
 from pathlib import Path
 from typing import List, Optional, Tuple, TYPE_CHECKING
 from hermes_cli.config import cfg_get
@@ -319,6 +320,33 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
     return results
 
 
+_LANCE_FORK_WARNING_FILTERED = False
+
+
+def _suppress_lance_fork_safety_warning() -> None:
+    """Silence lancedb's ``lance is not fork-safe`` UserWarning.
+
+    lancedb registers an at-fork handler that re-emits this UserWarning every
+    time the hermes process forks, including each ``subprocess.Popen`` the
+    terminal tool spawns, so it floods normal command output. It is cosmetic:
+    lance is only ever read from the parent here, never used across the fork.
+    We filter that one specific message (matched by text + ``UserWarning``)
+    rather than touching global warning state, so no other warnings are lost.
+
+    Installed once, lazily, when a memory provider is loaded. The message
+    specificity means it is a no-op for non-lance providers.
+    """
+    global _LANCE_FORK_WARNING_FILTERED
+    if _LANCE_FORK_WARNING_FILTERED:
+        return
+    warnings.filterwarnings(
+        "ignore",
+        message=r"lance is not fork-safe",
+        category=UserWarning,
+    )
+    _LANCE_FORK_WARNING_FILTERED = True
+
+
 def load_memory_provider(
     name: str,
     *,
@@ -338,6 +366,10 @@ def load_memory_provider(
     """
     if register_skills is None:
         register_skills = name == _get_active_memory_provider()
+
+    # Install before importing the provider module so the filter is already in
+    # place when a lance-backed plugin registers its at-fork warning hook.
+    _suppress_lance_fork_safety_warning()
 
     provider_dir = find_provider_dir(name)
     entry_point = None if provider_dir else find_provider_entry_point(name)
