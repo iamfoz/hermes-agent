@@ -2303,3 +2303,80 @@ class TestRetryLaunchctlBootstrapUntilRegistered:
         )
         assert ok is False
         assert list_calls["n"] >= 1
+
+
+class TestRestartOutputGuard:
+    """The dispatcher's restart wrapper must guarantee a visible
+    confirmation reaches the terminal, even when an inner path
+    returns silently, and must always flush stdout before unwinding.
+    """
+
+    def test_silent_dispatch_falls_back_to_service_restarted(self, monkeypatch, capsys):
+        """If the underlying dispatch returns without printing anything,
+        the wrapper emits a generic ``✓ Service restarted`` so the user
+        never sees just a blank line."""
+        monkeypatch.setattr(
+            gateway_cli, "_gateway_restart_subcommand", lambda args: None
+        )
+        gateway_cli._restart_with_output_guard(SimpleNamespace())
+        out = capsys.readouterr().out
+        assert "✓ Service restarted" in out
+
+    def test_dispatch_output_passes_through_without_fallback(self, monkeypatch, capsys):
+        """If the underlying dispatch prints its own confirmation, the
+        wrapper must NOT also print the fallback, which would produce a
+        duplicate line."""
+        def fake(_args):
+            print("✓ User service restarted (PID 12345)")
+
+        monkeypatch.setattr(gateway_cli, "_gateway_restart_subcommand", fake)
+        gateway_cli._restart_with_output_guard(SimpleNamespace())
+        out = capsys.readouterr().out
+        assert "✓ User service restarted (PID 12345)" in out
+        # The generic fallback must not also fire.
+        assert "✓ Service restarted\n" not in out
+
+    def test_whitespace_only_output_still_triggers_fallback(self, monkeypatch, capsys):
+        """A blank ``print()`` for spacing doesn't count as a real
+        confirmation; the fallback should still fire."""
+        def fake(_args):
+            print()
+            print()
+
+        monkeypatch.setattr(gateway_cli, "_gateway_restart_subcommand", fake)
+        gateway_cli._restart_with_output_guard(SimpleNamespace())
+        out = capsys.readouterr().out
+        assert "✓ Service restarted" in out
+
+    def test_dispatch_exception_propagates_and_skips_fallback(self, monkeypatch, capsys):
+        """If the dispatch raises, the wrapper must re-raise verbatim and
+        must NOT print the success fallback (it isn't a success)."""
+        class _BoomError(RuntimeError):
+            pass
+
+        def fake(_args):
+            raise _BoomError("upstream is wedged")
+
+        monkeypatch.setattr(gateway_cli, "_gateway_restart_subcommand", fake)
+        with pytest.raises(_BoomError, match="upstream is wedged"):
+            gateway_cli._restart_with_output_guard(SimpleNamespace())
+        out = capsys.readouterr().out
+        assert "✓ Service restarted" not in out
+
+    def test_dispatch_sys_exit_propagates(self, monkeypatch, capsys):
+        """``sys.exit(N)`` raises SystemExit, which is a BaseException,
+        the wrapper must still let it propagate so the process exits
+        with the right code (e.g. for the "service configured but
+        restart failed" branch that exits 1)."""
+        def fake(_args):
+            print("✗ Gateway service restart failed.")
+            raise SystemExit(1)
+
+        monkeypatch.setattr(gateway_cli, "_gateway_restart_subcommand", fake)
+        with pytest.raises(SystemExit) as excinfo:
+            gateway_cli._restart_with_output_guard(SimpleNamespace())
+        assert excinfo.value.code == 1
+        out = capsys.readouterr().out
+        assert "✗ Gateway service restart failed." in out
+        # No success fallback when an exception is in flight.
+        assert "✓ Service restarted" not in out
