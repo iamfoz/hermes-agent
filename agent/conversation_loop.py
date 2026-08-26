@@ -7791,7 +7791,7 @@ def run_conversation(
                             agent._post_tool_empty_retries,
                         )
                         agent._buffer_status(
-                            f"⚠️ Model returned empty after tool calls — "
+                            f"⚠️ Model returned empty after tool calls - "
                             f"nudging to continue ({agent._post_tool_empty_retries}/2)"
                         )
                         # Append the empty assistant message first so the
@@ -7806,7 +7806,7 @@ def run_conversation(
 
                         if agent._post_tool_empty_retries >= 2:
                             # ── Strong nudge with context reinjection ──
-                            # Second attempt failed — reinject the tool results
+                            # Second attempt failed - reinject the tool results
                             # as a summary so the model has something concrete
                             # to work with.
                             _tool_summaries = []
