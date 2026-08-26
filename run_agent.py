@@ -2785,7 +2785,7 @@ class AIAgent:
                 return AIAgent._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
 
         # jmunch-mcp gateway: SSE-streamed error with embedded JSON.
-        # The raw error string contains "data: {" lines — extract the error
+        # The raw error string contains "data: {" lines, so extract the error
         # object to surface the real upstream error (e.g., "upstream airouter
         # returned 429") instead of an opaque "HTTP 502: data: {...}".
         if "data:" in raw and ("UPSTREAM_ERROR" in raw or '"code"' in raw):
