@@ -1022,20 +1022,17 @@ def build_turn_context(
             _clear_warn = getattr(agent, "_clear_context_overflow_warn", None)
             if callable(_clear_warn):
                 _clear_warn()
-            logger.info(
-                "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-                f"{_preflight_tokens:,}",
-                f"{_compressor.threshold_tokens:,}",
-                agent.model,
-                f"{_compressor.context_length:,}",
-            )
+            # Default preflight compression banner intentionally silenced: the
+            # generic "Preflight compression: ~N tokens >= threshold" status
+            # fires on every long session and is pure noise the user cannot act
+            # on. Compression is transparent. Passing an empty default_message
+            # suppresses that generic banner while still emitting a context
+            # engine's custom preflight status when one is provided (engines can
+            # define get_automatic_compaction_status_message).
             _preflight_status = automatic_compaction_status_message(
                 _compressor,
                 phase="preflight",
-                default_message=PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(
-                    tokens=_preflight_tokens,
-                    threshold=_compressor.threshold_tokens,
-                ),
+                default_message="",
                 approx_tokens=_preflight_tokens,
                 threshold_tokens=_compressor.threshold_tokens,
                 context_length=_compressor.context_length,

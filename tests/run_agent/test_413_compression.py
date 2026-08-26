@@ -673,7 +673,11 @@ class TestPreflightCompression:
         )
         assert result["completed"] is True
         assert result["final_response"] == "After preflight"
-        assert any(
+        # The preflight-compression status banner is intentionally silenced
+        # (pure noise for the user, since compression is transparent). Compression
+        # itself still ran, verified by mock_compress above; what must NOT
+        # happen is a user-facing "Preflight compression" lifecycle banner.
+        assert not any(
             ev == "lifecycle" and "Preflight compression" in msg
             for ev, msg in status_messages
         )
