@@ -1454,6 +1454,18 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 logger.info("tool %s failed (%.2fs): %s", function_name, duration, result[:200])
             else:
                 logger.info("tool %s completed (%.2fs, %d chars)", function_name, duration, len(result))
+            # Notify memory providers (parallel-tool-call path). Best-effort.
+            if agent._memory_manager is not None:
+                try:
+                    agent._memory_manager.notify_tool_call(
+                        function_name,
+                        function_args if isinstance(function_args, dict) else {},
+                        result,
+                        session_id=agent.session_id or "",
+                        success=not is_error,
+                    )
+                except Exception:
+                    pass
             results[index] = (
                 function_name,
                 function_args,
@@ -2693,6 +2705,21 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                 duration_ms=int(tool_duration * 1000),
                 middleware_trace=list(middleware_trace),
             )
+
+        # Notify memory providers of the tool call (any tool, not just
+        # provider-owned). Best-effort; failures don't disturb dispatch.
+        if agent._memory_manager is not None:
+            try:
+                agent._memory_manager.notify_tool_call(
+                    function_name,
+                    function_args if isinstance(function_args, dict) else {},
+                    function_result,
+                    session_id=agent.session_id or "",
+                    success=not _is_error_result,
+                )
+            except Exception:
+                pass
+
         if not _execution_blocked:
             function_result = agent._append_guardrail_observation(
                 function_name,

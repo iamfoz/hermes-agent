@@ -4521,6 +4521,15 @@ class AIAgent:
         if not (user_text and response_text):
             return
         try:
+            # Notify providers which prefetched memories the response
+            # actually referenced (per-provider heuristic). Fires BEFORE
+            # sync_all so providers can credit recalls before persisting
+            # the new turn - which keeps the recall-credit signal
+            # separate from the new-memory-creation signal.
+            self._memory_manager.notify_recall_used(
+                final_response,
+                session_id=self.session_id or "",
+            )
             sync_kwargs = {"session_id": self.session_id or ""}
             if messages is not None:
                 sync_kwargs["messages"] = messages
