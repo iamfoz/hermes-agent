@@ -1930,6 +1930,9 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+    # Per-turn dynamic system-prompt context from providers that override
+    # `before_prompt_build` (new memory-context-as-system-prompt path).
+    _ext_system_prompt_cache = _ctx.ext_system_prompt_cache
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -2285,12 +2288,30 @@ def run_conversation(
             # transport strips underscore keys, so drop it centrally here.
             api_msg.pop("_row_id", None)
 
+            # Inject per-turn dynamic memory-provider context into the
+            # SYSTEM prompt for providers that override before_prompt_build.
+            # This is the new (memory-context-as-system-prompt) path - 
+            # providers that prefer it get their context placed where the
+            # LLM treats it as authoritative agent context, not as
+            # user-supplied input. The original `messages` is never
+            # mutated; only api_msg gets the injection per-iteration.
+            if idx == 0 and msg.get("role") == "system" and _ext_system_prompt_cache:
+                _fenced_sys = build_memory_context_block(_ext_system_prompt_cache)
+                if _fenced_sys:
+                    _base_sys = api_msg.get("content", "")
+                    if isinstance(_base_sys, str):
+                        api_msg["content"] = _base_sys + "\n\n" + _fenced_sys
+
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
             # with target="user_message" (the default).  Both are
             # API-call-time only — the original message in `messages` is
             # never mutated beyond the api_content stamp, so nothing leaks
             # into the clean transcript content.
+            # never mutated, so nothing leaks into session persistence.
+            # Note: providers that override before_prompt_build are skipped
+            # by prefetch_all (above), so _ext_prefetch_cache only contains
+            # output from legacy providers using the user-message path.
             if idx == current_turn_user_idx and msg.get("role") == "user":
                 if isinstance(_api_content, str) and _api_content:
                     # Stamped by the prologue from the same composition —

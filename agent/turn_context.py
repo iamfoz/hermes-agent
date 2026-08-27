@@ -452,6 +452,9 @@ class TurnContext:
     ext_prefetch_cache: str = ""
     # Turn-start preflight already proved an immediate retry ineffective.
     preflight_compression_blocked: bool = False
+    # Per-turn dynamic system-prompt context from providers that override
+    # ``before_prompt_build`` (memory-context-as-system-prompt path).
+    ext_system_prompt_cache: str = ""
 
 
 def build_turn_context(
@@ -1385,11 +1388,33 @@ def build_turn_context(
     # Skip prefetch on trivial prompts (greetings, acknowledgements) to
     # prevent memory-context injection on turns that carry no semantic signal.
     ext_prefetch_cache = ""
+    # Per-turn dynamic system-prompt context from providers that override
+    # ``before_prompt_build``. This is the new (memory-context-as-system-
+    # prompt) injection path; providers that haven't migrated stay on the
+    # user-message path via ``prefetch_all`` (which skips the migrated ones
+    # to prevent double-injection).
+    ext_system_prompt_cache = ""
     if agent._memory_manager:
         try:
             _query = original_user_message if isinstance(original_user_message, str) else ""
             if not is_trivial_prompt(_query):
                 ext_prefetch_cache = agent._memory_manager.prefetch_all(_query) or ""
+        except Exception:
+            pass
+        try:
+            _turn_state = {
+                "query": _query if isinstance(original_user_message, str) else "",
+                "session_id": agent.session_id or "",
+                "parent_session_id": getattr(agent, "_parent_session_id", "") or "",
+                "turn_number": agent._user_turn_count,
+                "model": getattr(agent, "model", "") or "",
+                "platform": getattr(agent, "platform", "") or "",
+                "agent_id": getattr(agent, "agent_identity", "") or "",
+            }
+            ext_system_prompt_cache = (
+                agent._memory_manager.build_dynamic_system_prompt(_turn_state)
+                or ""
+            )
         except Exception:
             pass
         # Deterministic, model-independent recall indicator: when memory was
@@ -1513,4 +1538,5 @@ def build_turn_context(
         plugin_user_context=plugin_user_context,
         ext_prefetch_cache=ext_prefetch_cache,
         preflight_compression_blocked=_preflight_compression_blocked,
+        ext_system_prompt_cache=ext_system_prompt_cache,
     )
