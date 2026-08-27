@@ -457,6 +457,82 @@ class TestDeliverResultWrapping:
         standalone_send.assert_not_awaited()
 
 
+    def test_per_job_wrap_response_false_overrides_global_true(self):
+        """A per-job wrap_response=False delivers raw output even when the global config wraps."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": True}}):
+            job = {
+                "id": "test-job",
+                "name": "morning-briefing",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+                "wrap_response": False,
+            }
+            _deliver_result(job, "Good morning.")
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == "Good morning."
+        assert "Cronjob Response" not in sent_content
+
+    def test_per_job_wrap_response_true_overrides_global_false(self):
+        """A per-job wrap_response=True forces wrapping even when global config disables it."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
+            job = {
+                "id": "test-job",
+                "name": "noisy-job",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+                "wrap_response": True,
+            }
+            _deliver_result(job, "Output.")
+
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert "Cronjob Response: noisy-job" in sent_content
+        assert "To stop or manage this job" in sent_content
+
+    def test_delivery_skips_wrapping_when_config_disabled(self):
+        """When cron.wrap_response is false, deliver raw content without header/footer."""
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.TELEGRAM: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}):
+            job = {
+                "id": "test-job",
+                "name": "daily-report",
+                "deliver": "origin",
+                "origin": {"platform": "telegram", "chat_id": "123"},
+            }
+            _deliver_result(job, "Clean output only.")
+
+        send_mock.assert_called_once()
+        sent_content = send_mock.call_args.kwargs.get("content") or send_mock.call_args[0][-1]
+        assert sent_content == "Clean output only."
+        assert "Cronjob Response" not in sent_content
+        assert "The agent cannot see" not in sent_content
+
     def test_live_adapter_sends_media_as_attachments(self, tmp_path, monkeypatch):
         """When a live adapter is available, MEDIA files should be sent as native
         platform attachments (e.g., Discord voice, Telegram audio) rather than

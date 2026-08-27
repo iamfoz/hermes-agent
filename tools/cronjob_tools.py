@@ -1371,6 +1371,7 @@ def cronjob(
     monitor_script: Optional[str] = None,
     monitor_url: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
+    wrap_response: Optional[bool] = None,
     task_id: str = None,
     session_id: Optional[str] = None,
 ) -> str:
@@ -1487,6 +1488,7 @@ def cronjob(
                     # dispatch below: models do not make model-config
                     # decisions (standing policy).
                     reasoning_effort=reasoning_effort,
+                    wrap_response=wrap_response,
                 )
             except CronSchedulerRegistrationError as exc:
                 _partial = exc.to_dict()
@@ -1799,6 +1801,8 @@ def cronjob(
                             success=False,
                         )
                 updates["no_agent"] = target_no_agent
+            if wrap_response is not None:
+                updates["wrap_response"] = bool(wrap_response)
             if repeat is not None:
                 # Normalize: treat 0 or negative as None (infinite)
                 normalized_repeat = None if repeat <= 0 else repeat
@@ -1907,6 +1911,16 @@ Jobs run in a fresh session with no current-chat context, so prompts must be sel
                 "type": "boolean",
                 "description": "True = the job's delivery is CONTINUABLE — the user can reply and the agent has the brief in context (threads on thread-capable platforms, mirrored into the DM elsewhere). Use for conversational recurring jobs (briefings); leave unset for fire-and-forget alerts. Scope: the job's own conversation only — the origin chat, the home-channel fallback when deliver='origin' captured no origin (script-created jobs), or the job's single explicit platform:chat target (this flag is the only way to attach an explicit target). Broadcast targets are never attached; no effect when deliver='local'."
             },
+            "wrap_response": {
+                "type": "boolean",
+                "description": (
+                    "Per-job override for the 'Cronjob Response: <name>' header and "
+                    "'To stop or manage this job...' footer that wrap delivered output. "
+                    "True forces wrapping on; False delivers the raw agent output verbatim "
+                    "(useful for briefings the user wants to read clean). "
+                    "Omit to inherit the global cron.wrap_response config (defaults True)."
+                ),
+            },
         },
         "required": ["action"]
     }
@@ -1975,6 +1989,7 @@ def _cronjob_handler(args, **kw):
         attach_to_session=args.get("attach_to_session"),
         monitor_script=_mon_script,
         monitor_url=_mon_url,
+        wrap_response=args.get("wrap_response"),
         task_id=kw.get("task_id"),
         session_id=kw.get("session_id"),
     )

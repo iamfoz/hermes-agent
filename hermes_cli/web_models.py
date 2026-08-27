@@ -391,6 +391,7 @@ class CronJobCreate(BaseModel):
     enabled_toolsets: Optional[List[str]] = None
     workdir: Optional[str] = None
     no_agent: bool = False
+    wrap_response: Optional[bool] = None
 
 
 class CronJobUpdate(BaseModel):

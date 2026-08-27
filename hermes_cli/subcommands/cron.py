@@ -132,6 +132,21 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "monitors, incremental digests). First run is unchanged."
         ),
     )
+    cron_create.add_argument(
+        "--wrap-response",
+        dest="wrap_response",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Force the cron header/footer ('Cronjob Response: ...' / 'To stop or manage this job...') ON for this job, overriding the global config.",
+    )
+    cron_create.add_argument(
+        "--no-wrap-response",
+        dest="wrap_response",
+        action="store_const",
+        const=False,
+        help="Deliver this job's output raw - without the cron header/footer. Useful for briefings you want to read clean.",
+    )
 
     # cron edit
     cron_edit = cron_subparsers.add_parser(
@@ -253,6 +268,21 @@ def build_cron_parser(subparsers, *, cmd_cron: Callable) -> None:
             "medium, high, xhigh, max, or ultra. Pass empty string to clear "
             "the pin and follow config resolution."
         ),
+    )
+    cron_edit.add_argument(
+        "--wrap-response",
+        dest="wrap_response",
+        action="store_const",
+        const=True,
+        default=None,
+        help="Turn the cron header/footer ON for this job (overrides the global config).",
+    )
+    cron_edit.add_argument(
+        "--no-wrap-response",
+        dest="wrap_response",
+        action="store_const",
+        const=False,
+        help="Turn the cron header/footer OFF for this job - deliver raw output.",
     )
 
     # lifecycle actions

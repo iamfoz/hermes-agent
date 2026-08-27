@@ -3102,15 +3102,22 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     from gateway.config import load_gateway_config, Platform
 
     # Optionally wrap the content with a header/footer so the user knows this
-    # is a cron delivery.  Wrapping is on by default; set cron.wrap_response: false
-    # in config.yaml for clean output.
-    wrap_response = True
+    # is a cron delivery.  Per-job ``wrap_response`` overrides the global
+    # ``cron.wrap_response`` config (default True) when explicitly set.
+    # ``user_cfg`` is loaded unconditionally because it is reused downstream
+    # (apply_media_policy_env), regardless of which wrap source wins.
     user_cfg = None
     try:
         user_cfg = load_config()
-        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
     except Exception:
         pass
+    job_wrap = job.get("wrap_response")
+    if isinstance(job_wrap, bool):
+        wrap_response = job_wrap
+    elif user_cfg is not None:
+        wrap_response = user_cfg.get("cron", {}).get("wrap_response", True)
+    else:
+        wrap_response = True
 
     if wrap_response:
         task_name = job.get("name", job["id"])
