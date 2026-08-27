@@ -695,9 +695,29 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
         elif parts[i] == "--once":
             is_once = True
             i += 1
-        elif parts[i] == "--provider" and i + 1 < len(parts):
-            explicit_provider = parts[i + 1]
-            i += 2
+        elif parts[i] == "--provider":
+            # Consume every following token until the next ``--`` flag or the
+            # end of the args, so multi-word provider names (``--provider
+            # airouter JMunch``) work without shell-style quoting. Telegram and
+            # Discord pass the raw string through, so quoting would arrive
+            # verbatim anyway. Joining on a single space normalises any
+            # multi-whitespace runs to match how custom_providers entries are
+            # stored (single internal spaces).
+            j = i + 1
+            provider_tokens: list[str] = []
+            while j < len(parts) and not parts[j].startswith("--"):
+                provider_tokens.append(parts[j])
+                j += 1
+            explicit_provider = " ".join(provider_tokens).strip()
+            # Strip one surrounding quote pair if the user typed them out of
+            # habit; the raw string arrives unstripped on Telegram/Discord.
+            if (
+                len(explicit_provider) >= 2
+                and explicit_provider[0] == explicit_provider[-1]
+                and explicit_provider[0] in {'"', "'"}
+            ):
+                explicit_provider = explicit_provider[1:-1].strip()
+            i = j
         else:
             filtered.append(parts[i])
             i += 1
