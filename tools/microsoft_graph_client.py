@@ -48,7 +48,7 @@ class MicrosoftGraphClient:
 
     def __init__(
         self,
-        token_provider: MicrosoftGraphTokenProvider,
+        token_provider: Any,
         *,
         base_url: str = DEFAULT_GRAPH_BASE_URL,
         timeout: float = 60.0,
@@ -256,6 +256,251 @@ class MicrosoftGraphClient:
         raise MicrosoftGraphClientError(
             f"Microsoft Graph download exhausted retries for GET {url}."
         )
+
+    # ── Mail operations ────────────────────────────────────────────────
+
+    FOLDER_LOOKUP: dict[str, str] = {
+        "inbox": "me/mailFolders/inbox/messages",
+        "sent": "me/mailFolders/sentItems/messages",
+        "drafts": "me/mailFolders/drafts/messages",
+        "deleted": "me/mailFolders/deletedItems/messages",
+        "archive": "me/mailFolders/archive/messages",
+        "junk": "me/mailFolders/junkEmail/messages",
+        "outbox": "me/mailFolders/outbox/messages",
+    }
+
+    async def get_messages(
+        self,
+        folder: str = "inbox",
+        *,
+        top: int = 50,
+        filter_str: str | None = None,
+        sort: str = "receivedDateTime desc",
+        fields: list[str] | None = None,
+        include_pagination: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Fetch messages from a mailbox folder via ``/me/mailFolders/{folder}/messages``.
+
+        Args:
+            folder: Folder name (``inbox``, ``sent``, ``drafts``, ``deleted``,
+                    ``archive``, ``junk``, ``outbox``, or an arbitrary folder path).
+            top: Maximum messages to return (default 50, Graph cap 1000).
+            filter_str: OData ``$filter`` expression.
+            sort: OData ``$orderby`` expression.
+            fields: Subset of fields to return (``$select``).
+            include_pagination: If true, follow ``@odata.nextLink`` to collect all pages.
+        """
+        endpoint = self.FOLDER_LOOKUP.get(
+            folder, f"me/mailFolders/{folder}/messages"
+        )
+        params: dict[str, Any] = {"$top": min(top, 1000), "$orderby": sort}
+        if filter_str:
+            params["$filter"] = filter_str
+        if fields:
+            params["$select"] = ",".join(fields)
+
+        if include_pagination:
+            return await self.collect_paginated(endpoint, params=params)  # type: ignore[arg-type]
+        result = await self.get_json(endpoint, params=params)
+        if not isinstance(result, dict):
+            return []
+        return result.get("value", [])
+
+    async def send_mail(
+        self,
+        to: list[str],
+        subject: str,
+        body: str,
+        *,
+        html: bool = True,
+        cc: list[str] | None = None,
+        bcc: list[str] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Send an email via ``POST /me/sendMail``.
+
+        Args:
+            to: Primary recipient email addresses.
+            subject: Email subject line.
+            body: Email body content.
+            html: True if body is HTML, False for plain text.
+            cc: CC recipient email addresses.
+            bcc: BCC recipient email addresses.
+            attachments: Optional list of attachment dicts (each with
+                ``@odata.type``, ``name``, ``contentType``, ``contentBytes``).
+        """
+        message: dict[str, Any] = {
+            "message": {
+                "subject": subject,
+                "body": {
+                    "contentType": "HTML" if html else "text",
+                    "content": body,
+                },
+                "toRecipients": [
+                    {"emailAddress": {"address": addr}} for addr in to
+                ],
+            },
+        }
+        if cc:
+            message["message"]["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc
+            ]
+        if bcc:
+            message["message"]["bccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in bcc
+            ]
+        if attachments:
+            message["message"]["attachments"] = attachments
+
+        return await self.post_json("me/sendMail", json_body=message)
+
+    # ── Calendar operations ────────────────────────────────────────────
+
+    async def get_calendar_events(
+        self,
+        start: str,
+        end: str,
+        *,
+        calendar_id: str = "me",
+        include_cancelled: bool = False,
+        fields: list[str] | None = None,
+        timezone: str = "Europe/London",
+    ) -> list[dict[str, Any]]:
+        """Fetch calendar events within a date range via ``GET /{calendarId}/calendarView``.
+
+        Args:
+            start: Start of range (ISO datetime or YYYY-MM-DD).
+            end: End of range (ISO datetime or YYYY-MM-DD).
+            calendar_id: Calendar scope (``me``, ``user@domain.com``, or a calendar ID).
+            include_cancelled: If true, include cancelled events.
+            fields: Subset of fields to return (``$select``).
+            timezone: Timezone for date/time parameters.
+        """
+        # Normalise to ISO datetime if date-only
+        if "T" not in start:
+            start = f"{start}T00:00:00"
+        if "T" not in end:
+            end = f"{end}T23:59:00"
+
+        params: dict[str, Any] = {
+            "startDateTime": start,
+            "endDateTime": end,
+        }
+        if fields:
+            params["$select"] = ",".join(fields)
+        if not include_cancelled:
+            params.setdefault("$filter", "")
+            if params["$filter"]:
+                params["$filter"] += " and "
+            params["$filter"] += "isCancelled eq false"
+
+        endpoint = f"{calendar_id}/calendarView"
+        result = await self.get_json(
+            endpoint,
+            params=params,
+            headers={"Prefer": f'outlook.timezone="{timezone}"'},
+        )
+        if not isinstance(result, dict):
+            return []
+        return result.get("value", [])
+
+    async def create_calendar_event(
+        self,
+        event_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Create a calendar event via ``POST /me/events``.
+
+        Args:
+            event_data: Event properties. Supported keys:
+                - ``subject`` (required)
+                - ``start``, ``end`` (required, ISO format)
+                - ``location`` (string)
+                - ``body`` (string, HTML)
+                - ``attendees`` (list of email strings or dicts)
+                - ``show_as`` (``busy``, ``free``, ``tentative``, ``oof``, ``workingElsewhere``)
+                - ``visibility`` (``default``, ``private``, ``confidential``)
+                - ``reminders`` (int, minutes before)
+                - ``all_day`` (bool)
+                - ``categories`` (list of strings)
+        """
+        body = self._format_event_body(event_data)
+        return await self.post_json("me/events", json_body=body)
+
+    async def update_calendar_event(
+        self,
+        event_id: str,
+        event_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Update an existing calendar event via ``PATCH /me/events/{id}``.
+
+        Args:
+            event_id: The event's Graph ID.
+            event_data: Properties to update (same keys as ``create_calendar_event``).
+        """
+        body = self._format_event_body(event_data)
+        return await self.patch_json(f"me/events/{event_id}", json_body=body)
+
+    async def delete_calendar_event(
+        self,
+        event_id: str,
+    ) -> dict[str, Any]:
+        """Delete a calendar event via ``DELETE /me/events/{id}``."""
+        return await self.delete(f"me/events/{event_id}")
+
+    @staticmethod
+    def _format_event_body(data: dict[str, Any]) -> dict[str, Any]:
+        """Convert user-friendly event dict to Graph API format."""
+        body: dict[str, Any] = {}
+
+        if "subject" in data:
+            body["subject"] = data["subject"]
+
+        if "start" in data and "end" in data:
+            if data.get("all_day"):
+                body["start"] = {"date": data["start"], "timeZone": "UTC"}
+                body["end"] = {"date": data["end"], "timeZone": "UTC"}
+                body["isAllDay"] = True
+            else:
+                body["start"] = {
+                    "dateTime": data["start"],
+                    "timeZone": data.get("timezone", "Europe/London"),
+                }
+                body["end"] = {
+                    "dateTime": data["end"],
+                    "timeZone": data.get("timezone", "Europe/London"),
+                }
+
+        if "location" in data:
+            body["location"] = {"displayName": data["location"]}
+
+        if "body" in data:
+            body["body"] = {
+                "contentType": "HTML",
+                "content": data["body"],
+            }
+
+        if "attendees" in data:
+            body["attendees"] = [
+                {"emailAddress": {"address": a}, "type": "required"}
+                if isinstance(a, str)
+                else a
+                for a in data["attendees"]
+            ]
+
+        if "show_as" in data:
+            body["showAs"] = data["show_as"]
+        if "visibility" in data:
+            body["visibility"] = data["visibility"]
+        if "reminders" in data:
+            body["reminderMinutesBeforeStart"] = (
+                data["reminders"]
+                if isinstance(data["reminders"], int)
+                else data["reminders"][0]
+            )
+        if "categories" in data:
+            body["categories"] = data["categories"]
+
+        return body
 
     async def _request(
         self,
