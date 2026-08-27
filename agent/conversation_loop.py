@@ -7387,9 +7387,9 @@ def run_conversation(
                     agent._thinking_prefill_retries = 0
                     agent._empty_content_retries = 0
                 # Successful tool execution — reset the post-tool nudge
-                # flag so it can fire again if the model goes empty on
+                # counter so it can fire again if the model goes empty on
                 # a LATER tool round.
-                agent._post_tool_empty_retried = False
+                agent._post_tool_empty_retries = 0
                 # A landed tool call means any earlier dropped-tool-call stall
                 # was recovered — refresh that budget too so it guards each
                 # stall independently rather than capping the whole run.
@@ -7806,21 +7806,22 @@ def run_conversation(
                     )
                     if (
                         _prior_was_tool
-                        and not getattr(agent, "_post_tool_empty_retried", False)
+                        and getattr(agent, "_post_tool_empty_retries", 0) < 2
                         and not _has_inline_thinking  # thinking model still working — let prefill handle
                     ):
-                        agent._post_tool_empty_retried = True
+                        agent._post_tool_empty_retries = getattr(agent, "_post_tool_empty_retries", 0) + 1
                         # Clear stale narration so it doesn't resurface
                         # on a later empty response after the nudge.
                         agent._last_content_with_tools = None
                         agent._last_content_tools_all_housekeeping = False
                         logger.info(
                             "Empty response after tool calls — nudging model "
-                            "to continue processing"
+                            "to continue processing (attempt %d/2)",
+                            agent._post_tool_empty_retries,
                         )
                         agent._buffer_status(
-                            "⚠️ Model returned empty after tool calls — "
-                            "nudging to continue"
+                            f"⚠️ Model returned empty after tool calls - "
+                            f"nudging to continue ({agent._post_tool_empty_retries}/2)"
                         )
                         # Append the empty assistant message first so the
                         # message sequence stays valid:
@@ -7831,9 +7832,44 @@ def run_conversation(
                         _nudge_msg["content"] = "(empty)"
                         _nudge_msg["_empty_recovery_synthetic"] = True
                         append_message(messages, _nudge_msg)
+
+                        if agent._post_tool_empty_retries >= 2:
+                            # ── Strong nudge with context reinjection ──
+                            # Second attempt failed - reinject the tool results
+                            # as a summary so the model has something concrete
+                            # to work with.
+                            _tool_summaries = []
+                            for _m in messages[-10:]:  # scan recent messages
+                                if _m.get("role") == "tool":
+                                    _name = _m.get("name", "unknown")
+                                    _content = _m.get("content", "")
+                                    # Truncate long tool outputs
+                                    _preview = _content[:300]
+                                    if len(_content) > 300:
+                                        _preview += f" [...{len(_content)} chars total]"
+                                    _tool_summaries.append(f"- {_name}: {_preview}")
+
+                            _nudge_text = (
+                                "You just executed tool calls but didn't process the results. "
+                                "Here's what you need to respond to:\n\n"
+                            )
+                            if _tool_summaries:
+                                _nudge_text += "Tool results:\n" + "\n".join(_tool_summaries) + "\n\n"
+                            _nudge_text += (
+                                "Please provide your response based on these tool results. "
+                                "If you've completed the task, give your final answer. "
+                                "If more work is needed, explain what's next and do it."
+                            )
+                        else:
+                            _nudge_text = (
+                                "You just executed tool calls but returned an "
+                                "empty response. Please process the tool "
+                                "results above and continue with the task."
+                            )
+
                         append_message(messages, {
                             "role": "user",
-                            "content": _EMPTY_TOOL_RESPONSE_NUDGE,
+                            "content": _nudge_text,
                             "_empty_recovery_synthetic": True,
                         })
                         continue
