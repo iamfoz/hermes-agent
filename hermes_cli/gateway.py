@@ -1467,19 +1467,21 @@ def _wait_for_systemd_service_restart(
                     runtime_state = _gateway_runtime_status_for_pid(new_pid)
                 gateway_state = (runtime_state or {}).get("gateway_state")
                 if gateway_state == "running":
-                    print(f"✓ {scope_label} service restarted (PID {new_pid})")
+                    print(f"✓ {scope_label} service restarted (PID {new_pid})", flush=True)
                     return True
                 if gateway_state == "startup_failed":
                     reason = (runtime_state or {}).get(
                         "exit_reason"
                     ) or "startup failed"
                     print(
-                        f"⚠ {scope_label} service process restarted (PID {new_pid}), but gateway startup failed: {reason}"
+                        f"⚠ {scope_label} service process restarted (PID {new_pid}), but gateway startup failed: {reason}",
+                        flush=True,
                     )
                     return False
                 if not printed_runtime_wait:
                     print(
-                        f"⏳ {scope_label} service process started (PID {new_pid}); waiting for gateway runtime..."
+                        f"⏳ {scope_label} service process started (PID {new_pid}); waiting for gateway runtime...",
+                        flush=True,
                     )
                     printed_runtime_wait = True
 
@@ -5543,7 +5545,7 @@ def launchd_restart():
     try:
         pid = get_running_pid()
         if pid is not None and _request_gateway_self_restart(pid):
-            print("✓ Service restart requested")
+            print("✓ Service restart requested", flush=True)
             _clear_launchd_unsupported_marker()
             return
         if pid is not None and probe_gateway_loop_liveness(pid) == GATEWAY_LOOP_WEDGED:
@@ -5579,10 +5581,11 @@ def launchd_restart():
                 exited = _wait_for_gateway_exit(timeout=drain_timeout, force_after=None)
                 if not exited:
                     print(
-                        f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart"
+                        f"⚠ Gateway drain timed out after {drain_timeout:.0f}s — forcing launchd restart",
+                        flush=True,
                     )
         subprocess.run(["launchctl", "kickstart", "-k", target], check=True, timeout=90)
-        print("✓ Service restarted")
+        print("✓ Service restarted", flush=True)
         _clear_launchd_unsupported_marker()
     except subprocess.CalledProcessError as e:
         if not _launchd_error_indicates_unloaded(e):
@@ -5594,7 +5597,7 @@ def launchd_restart():
                 return
             raise
         # Job not loaded — bootstrap and start fresh
-        print("↻ launchd job was unloaded; reloading")
+        print("↻ launchd job was unloaded; reloading", flush=True)
         plist_path = get_launchd_plist_path()
         try:
             # Restart is the one path where the job is almost always still
@@ -5618,7 +5621,7 @@ def launchd_restart():
                 raise
             _launchd_fallback_to_detached(f"launchctl exit {e2.returncode}")
             return
-        print("✓ Service restarted")
+        print("✓ Service restarted", flush=True)
         _clear_launchd_unsupported_marker()
 
 
@@ -7962,6 +7965,224 @@ def _block_until_terminated() -> None:
         threading.Event().wait()
 
 
+def _restart_with_output_guard(args):
+    """Run the gateway-restart dispatch under a stdout-output tracker.
+
+    Users have reported intermittent blank-line output where they expect
+    ``✓ Service restarted`` after ``hermes gateway restart``. Every
+    success path in the dispatch already prints something on its own, so
+    the failure mode is most likely a fast process exit dropping
+    buffered output (e.g. when the CLI is being reaped alongside the
+    gateway it just restarted). This wrapper:
+
+    * Instruments ``sys.stdout.write`` so we can tell whether anything
+      visible (non-whitespace) reached the terminal during dispatch.
+    * Falls back to a generic ``✓ Service restarted`` print when nothing
+      visible was emitted, guaranteeing the user always sees a
+      confirmation instead of a bare newline.
+    * Always flushes stdout before unwinding, so buffered output can't
+      be lost on the process-exit path.
+
+    Exceptions raised by the dispatch are re-raised verbatim so the
+    outer ``gateway_command`` error handler still sees them.
+    """
+    import sys as _sys_r
+    saw_output = {"any": False}
+    orig_write = _sys_r.stdout.write
+
+    def _tracked(s):
+        if isinstance(s, str) and s.strip():
+            saw_output["any"] = True
+        return orig_write(s)
+
+    _sys_r.stdout.write = _tracked
+    pending_exc = None
+    result = None
+    try:
+        result = _gateway_restart_subcommand(args)
+    except BaseException as exc:
+        pending_exc = exc
+    finally:
+        _sys_r.stdout.write = orig_write
+        if pending_exc is None and not saw_output["any"]:
+            print("✓ Service restarted", flush=True)
+        try:
+            _sys_r.stdout.flush()
+        except Exception:
+            pass
+    if pending_exc is not None:
+        raise pending_exc
+    return result
+
+
+def _gateway_restart_subcommand(args):
+    """Body of the ``gateway restart`` subcommand, extracted so the
+    output-guard wrapper above can instrument it cleanly.
+    """
+    # Defense: refuse self-targeting gateway restart from inside the gateway.
+    # Prevents agent-initiated kill loops when combined with supervisor KeepAlive.
+    # The supervised probe also PASSES a plain foreground `hermes gateway run`
+    # (env set, PID owned, but no supervisor): that is intentional and
+    # harmless — with no supervisor there is no KeepAlive, so a self-restart
+    # is a single relaunch rather than a respawn loop.
+    from tools.process_registry import _is_supervised_gateway_process
+
+    if _is_supervised_gateway_process():
+        print_error(
+            "Refusing to restart the gateway from inside the gateway process.\n"
+            "This command was blocked to prevent restart loops.\n"
+            "Use `hermes gateway restart` from a shell outside the running gateway."
+        )
+        sys.exit(1)
+
+    # Try service first, fall back to killing and restarting
+    service_available = False
+    system = getattr(args, "system", False)
+    restart_all = getattr(args, "all", False)
+    service_configured = False
+
+    # Phase 4: inside a container with s6, dispatch via the service
+    # manager (s6-svc -t restarts the supervised process). ``--all``
+    # iterates every registered profile gateway through s6; without
+    # this it would fall through to ``pkill``, which s6-supervise
+    # would observe as a crash and immediately restart anyway.
+    if restart_all and _dispatch_all_via_service_manager_if_s6("restart"):
+        return
+    if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
+        return
+
+    if restart_all:
+        # --all: stop every gateway process across all profiles, then start fresh
+        service_stopped = False
+        if supports_systemd_services() and (
+            get_systemd_unit_path(system=False).exists()
+            or get_systemd_unit_path(system=True).exists()
+        ):
+            try:
+                systemd_stop(system=system)
+                service_stopped = True
+            except subprocess.CalledProcessError:
+                pass
+        elif is_macos() and get_launchd_plist_path().exists():
+            try:
+                launchd_stop()
+                service_stopped = True
+            except subprocess.CalledProcessError:
+                pass
+        elif is_windows():
+            from hermes_cli import gateway_windows
+
+            if gateway_windows.is_installed():
+                try:
+                    gateway_windows.stop()
+                    service_stopped = True
+                except (subprocess.CalledProcessError, RuntimeError):
+                    pass
+        killed = kill_gateway_processes(all_profiles=True)
+        total = killed + (1 if service_stopped else 0)
+        if total:
+            print(f"✓ Stopped {total} gateway process(es) across all profiles")
+        _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+
+        # Start the current profile's service fresh
+        print("Starting gateway...")
+        if supports_systemd_services() and (
+            get_systemd_unit_path(system=False).exists()
+            or get_systemd_unit_path(system=True).exists()
+        ):
+            systemd_start(system=system)
+        elif is_macos() and get_launchd_plist_path().exists():
+            launchd_start()
+        elif is_windows():
+            from hermes_cli import gateway_windows
+
+            # On Windows, even without a registered Scheduled Task / Startup
+            # entry, gateway_windows.start() uses the safe detached
+            # pythonw.exe launcher.  Do not fall back to run_gateway() here:
+            # when invoked from a gateway-hosted agent/tool call, foreground
+            # run_gateway() is tied to the very gateway process we just
+            # stopped and can die before the replacement is stable.
+            gateway_windows.start()
+        else:
+            run_gateway(verbose=0)
+        return
+
+    if supports_systemd_services() and (
+        get_systemd_unit_path(system=False).exists()
+        or get_systemd_unit_path(system=True).exists()
+    ):
+        service_configured = True
+        try:
+            systemd_restart(system=system)
+            service_available = True
+        except subprocess.CalledProcessError:
+            pass
+    elif is_macos() and get_launchd_plist_path().exists():
+        service_configured = True
+        try:
+            launchd_restart()
+            service_available = True
+        except subprocess.CalledProcessError:
+            pass
+    elif is_windows():
+        from hermes_cli import gateway_windows
+
+        # Prefer the Windows-specific restart path: it supports both
+        # registered Scheduled Task / Startup installs and no-service
+        # detached restarts.  In the normal successful Telegram-triggered
+        # restart flow, this avoids the generic foreground run_gateway()
+        # path that can be reaped with the old gateway process.  If the
+        # Windows backend raises, intentionally preserve the existing
+        # generic failure fallback below.
+        service_configured = gateway_windows.is_installed()
+        try:
+            gateway_windows.restart()
+            return
+        except (subprocess.CalledProcessError, RuntimeError, OSError):
+            pass
+
+    if not service_available:
+        # systemd/launchd restart failed — check if linger is the issue
+        if supports_systemd_services():
+            linger_ok, _detail = get_systemd_linger_status()
+            if linger_ok is not True:
+                import getpass
+
+                _username = getpass.getuser()
+                print()
+                print(
+                    "⚠ Cannot restart gateway as a service — linger is not enabled."
+                )
+                print(
+                    "  The gateway user service requires linger to function on headless servers."
+                )
+                print()
+                print(f"  Run:  sudo loginctl enable-linger {_username}")
+                print()
+                print("  Then restart the gateway:")
+                print("    hermes gateway restart")
+                return
+
+        if service_configured:
+            print()
+            print("✗ Gateway service restart failed.")
+            print(
+                "  The service definition exists, but the service manager did not recover it."
+            )
+            print("  Fix the service, then retry: hermes gateway start")
+            sys.exit(1)
+
+        # Manual restart: stop only this profile's gateway
+        if stop_profile_gateway():
+            print("✓ Stopped gateway for this profile")
+
+        _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
+
+        # Start fresh
+        print("Starting gateway...")
+        run_gateway(verbose=0)
+
+
 def _gateway_command_inner(args):
     subcmd = getattr(args, "gateway_command", None)
 
@@ -8317,168 +8538,7 @@ def _gateway_command_inner(args):
                 print(f"✓ Stopped {get_service_name()} service")
 
     elif subcmd == "restart":
-        # Defense: refuse self-targeting gateway restart from inside the gateway.
-        # Prevents agent-initiated kill loops when combined with supervisor KeepAlive.
-        # The supervised probe also PASSES a plain foreground `hermes gateway run`
-        # (env set, PID owned, but no supervisor): that is intentional and
-        # harmless — with no supervisor there is no KeepAlive, so a self-restart
-        # is a single relaunch rather than a respawn loop.
-        from tools.process_registry import _is_supervised_gateway_process
-
-        if _is_supervised_gateway_process():
-            print_error(
-                "Refusing to restart the gateway from inside the gateway process.\n"
-                "This command was blocked to prevent restart loops.\n"
-                "Use `hermes gateway restart` from a shell outside the running gateway."
-            )
-            sys.exit(1)
-
-        # Try service first, fall back to killing and restarting
-        service_available = False
-        system = getattr(args, "system", False)
-        restart_all = getattr(args, "all", False)
-        service_configured = False
-
-        # Phase 4: inside a container with s6, dispatch via the service
-        # manager (s6-svc -t restarts the supervised process). ``--all``
-        # iterates every registered profile gateway through s6; without
-        # this it would fall through to ``pkill``, which s6-supervise
-        # would observe as a crash and immediately restart anyway.
-        if restart_all and _dispatch_all_via_service_manager_if_s6("restart"):
-            return
-        if not restart_all and _dispatch_via_service_manager_if_s6("restart"):
-            return
-
-        if restart_all:
-            # --all: stop every gateway process across all profiles, then start fresh
-            service_stopped = False
-            if supports_systemd_services() and (
-                get_systemd_unit_path(system=False).exists()
-                or get_systemd_unit_path(system=True).exists()
-            ):
-                try:
-                    systemd_stop(system=system)
-                    service_stopped = True
-                except subprocess.CalledProcessError:
-                    pass
-            elif is_macos() and get_launchd_plist_path().exists():
-                try:
-                    launchd_stop()
-                    service_stopped = True
-                except subprocess.CalledProcessError:
-                    pass
-            elif is_windows():
-                from hermes_cli import gateway_windows
-
-                if gateway_windows.is_installed():
-                    try:
-                        gateway_windows.stop()
-                        service_stopped = True
-                    except (subprocess.CalledProcessError, RuntimeError):
-                        pass
-            killed = kill_gateway_processes(all_profiles=True)
-            total = killed + (1 if service_stopped else 0)
-            if total:
-                print(f"✓ Stopped {total} gateway process(es) across all profiles")
-            _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
-
-            # Start the current profile's service fresh
-            print("Starting gateway...")
-            if supports_systemd_services() and (
-                get_systemd_unit_path(system=False).exists()
-                or get_systemd_unit_path(system=True).exists()
-            ):
-                systemd_start(system=system)
-            elif is_macos() and get_launchd_plist_path().exists():
-                launchd_start()
-            elif is_windows():
-                from hermes_cli import gateway_windows
-
-                # On Windows, even without a registered Scheduled Task / Startup
-                # entry, gateway_windows.start() uses the safe detached
-                # pythonw.exe launcher.  Do not fall back to run_gateway() here:
-                # when invoked from a gateway-hosted agent/tool call, foreground
-                # run_gateway() is tied to the very gateway process we just
-                # stopped and can die before the replacement is stable.
-                gateway_windows.start()
-            else:
-                run_gateway(verbose=0)
-            return
-
-        if supports_systemd_services() and (
-            get_systemd_unit_path(system=False).exists()
-            or get_systemd_unit_path(system=True).exists()
-        ):
-            service_configured = True
-            try:
-                systemd_restart(system=system)
-                service_available = True
-            except subprocess.CalledProcessError:
-                pass
-        elif is_macos() and get_launchd_plist_path().exists():
-            service_configured = True
-            try:
-                launchd_restart()
-                service_available = True
-            except subprocess.CalledProcessError:
-                pass
-        elif is_windows():
-            from hermes_cli import gateway_windows
-
-            # Prefer the Windows-specific restart path: it supports both
-            # registered Scheduled Task / Startup installs and no-service
-            # detached restarts.  In the normal successful Telegram-triggered
-            # restart flow, this avoids the generic foreground run_gateway()
-            # path that can be reaped with the old gateway process.  If the
-            # Windows backend raises, intentionally preserve the existing
-            # generic failure fallback below.
-            service_configured = gateway_windows.is_installed()
-            try:
-                gateway_windows.restart()
-                return
-            except (subprocess.CalledProcessError, RuntimeError, OSError):
-                pass
-
-        if not service_available:
-            # systemd/launchd restart failed — check if linger is the issue
-            if supports_systemd_services():
-                linger_ok, _detail = get_systemd_linger_status()
-                if linger_ok is not True:
-                    import getpass
-
-                    _username = getpass.getuser()
-                    print()
-                    print(
-                        "⚠ Cannot restart gateway as a service — linger is not enabled."
-                    )
-                    print(
-                        "  The gateway user service requires linger to function on headless servers."
-                    )
-                    print()
-                    print(f"  Run:  sudo loginctl enable-linger {_username}")
-                    print()
-                    print("  Then restart the gateway:")
-                    print("    hermes gateway restart")
-                    return
-
-            if service_configured:
-                print()
-                print("✗ Gateway service restart failed.")
-                print(
-                    "  The service definition exists, but the service manager did not recover it."
-                )
-                print("  Fix the service, then retry: hermes gateway start")
-                sys.exit(1)
-
-            # Manual restart: stop only this profile's gateway
-            if stop_profile_gateway():
-                print("✓ Stopped gateway for this profile")
-
-            _wait_for_gateway_exit(timeout=10.0, force_after=5.0)
-
-            # Start fresh
-            print("Starting gateway...")
-            run_gateway(verbose=0)
+        return _restart_with_output_guard(args)
 
     elif subcmd == "status":
         deep = getattr(args, "deep", False)
