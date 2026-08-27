@@ -16778,6 +16778,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "status": self._handle_status_command,
                 "context": self._handle_context_command,
                 "restart": self._handle_restart_command,
+                "toolset": self._handle_toolset_command,
                 "approve": self._handle_approve_command,
                 "deny": self._handle_deny_command,
                 "pause": self._handle_pause_command,
@@ -18249,6 +18250,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "voice":
             return await self._handle_voice_command(event)
+
+        if canonical == "toolset":
+            return await self._handle_toolset_command(event)
 
         if self._draining:
             return f"⏳ Gateway is {self._status_action_gerund()} and is not accepting new work right now."
@@ -21789,6 +21793,167 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             return BlueprintCommandResult(f"Cron blueprint command failed: {e}")
 
+    async def _handle_toolset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
+        """Handle /toolset slash command - switch toolset presets.
+
+        Subcommands mirror the CLI handler:
+            /toolset - show active + list
+            /toolset list - same
+            /toolset clear - deactivate sticky preset + reset session
+            /toolset show <name> - show preset details
+            /toolset <name> - activate + auto-new session (default)
+            /toolset <name> --no-new - activate sticky, defer to manual /new
+        """
+        from hermes_cli.tools_config import (
+            get_active_preset,
+            list_presets,
+        )
+
+        args_raw = event.get_command_args().strip()
+        args = args_raw.split() if args_raw else []
+
+        config_path = _hermes_home / 'config.yaml'
+        try:
+            cfg = _load_gateway_config()
+        except Exception:
+            cfg = {}
+        presets = list_presets(cfg)
+
+        def _format_status() -> str:
+            active = get_active_preset(cfg)
+            lines = []
+            if active:
+                lines.append(f"**Active preset:** {active}")
+            else:
+                lines.append("**Active preset:** (none - default toolset)")
+            if not presets:
+                lines.append("")
+                lines.append(
+                    "No presets defined. Add entries under `toolset_presets:` in "
+                    "`~/.hermes/config.yaml`."
+                )
+                return "\n".join(lines)
+            lines.append("")
+            for name, preset in presets.items():
+                if not isinstance(preset, dict):
+                    continue
+                marker = "●" if name == active else "○"
+                desc = preset.get("description", "")
+                tools = preset.get("toolsets") or []
+                tools_str = ", ".join(tools) if tools else "default"
+                if desc:
+                    lines.append(f"{marker} **{name}** - {desc} ({tools_str})")
+                else:
+                    lines.append(f"{marker} **{name}** ({tools_str})")
+            lines.append("")
+            lines.append("`/toolset <name>` to switch (auto-starts new session)")
+            lines.append("`/toolset <name> --no-new` to switch without new session")
+            lines.append("`/toolset clear` to deactivate")
+            return "\n".join(lines)
+
+        def _format_show(name: str, preset: dict) -> str:
+            from hermes_cli.tools_config import resolve_preset as _resolve_preset
+            desc = preset.get("description", "")
+            tools = preset.get("toolsets") or []
+            disabled = preset.get("disabled_toolsets") or []
+            bundle = str(preset.get("bundle") or "").strip()
+            extras = preset.get("preload_skills") or []
+            # Effective skills come from the central resolver so what we
+            # display matches what session activation will load.
+            _, _, effective_skills = _resolve_preset(name, cfg)
+            lines = [f"**Preset:** {name}"]
+            if desc:
+                lines.append(f"**Description:** {desc}")
+            lines.append(f"**Toolsets:** {', '.join(tools) if tools else 'default'}")
+            lines.append(f"**Disabled:** {', '.join(disabled) if disabled else '(none)'}")
+            lines.append(f"**Bundle:** {bundle or '(none)'}")
+            if extras:
+                lines.append(f"**Extra skills:** {', '.join(extras)}")
+            lines.append(f"**Effective skills:** {', '.join(effective_skills) if effective_skills else '(none)'}")
+            return "\n".join(lines)
+
+        if not args:
+            return _format_status()
+
+        sub = args[0]
+
+        if sub == "list":
+            return _format_status()
+
+        if sub == "show":
+            if len(args) < 2:
+                return "Usage: `/toolset show <name>`"
+            name = args[1]
+            if name not in presets:
+                available = ", ".join(presets) if presets else "(none defined)"
+                return f"Unknown preset `{name}`. Available: {available}"
+            return _format_show(name, presets[name])
+
+        if sub == "clear":
+            if not get_active_preset(cfg):
+                return "No preset active."
+            try:
+                cfg["active_preset"] = ""
+                atomic_yaml_write(config_path, cfg)
+            except Exception as e:
+                return f"Failed to update config.yaml: {e}"
+            # Evict the cached agent so the next message rebuilds with the
+            # default toolset; mirror /new behaviour to keep prompt caching
+            # honest.
+            await self._handle_reset_command(event)
+            return (
+                "Preset cleared - default toolset active. Fresh session started."
+            )
+
+        # /toolset <name> [--no-new]
+        name = sub
+        flags = args[1:]
+        no_new = "--no-new" in flags
+
+        if name not in presets:
+            available = ", ".join(presets) if presets else "(none defined)"
+            return (
+                f"Unknown preset `{name}`. Available: {available}\n"
+                f"Define presets under `toolset_presets:` in `~/.hermes/config.yaml`."
+            )
+
+        try:
+            cfg["active_preset"] = name
+            atomic_yaml_write(config_path, cfg)
+        except Exception as e:
+            return f"Failed to update config.yaml: {e}"
+
+        from hermes_cli.tools_config import resolve_preset as _resolve_preset
+        preset = presets[name]
+        tools = preset.get("toolsets") or []
+        disabled = preset.get("disabled_toolsets") or []
+        # Resolve through the central helper so the activation message
+        # reflects the effective skill set (bundle.skills + extras),
+        # matching exactly what the next session will load.
+        _, _, skills = _resolve_preset(name, cfg)
+
+        detail_lines = []
+        if tools:
+            detail_lines.append(f"Toolsets: {', '.join(tools)}")
+        if disabled:
+            detail_lines.append(f"Disabled: {', '.join(disabled)}")
+        if skills:
+            detail_lines.append(f"Skills: {', '.join(skills)}")
+        detail = "\n".join(detail_lines)
+
+        if no_new:
+            head = f"Preset **{name}** saved. Run /new to activate it."
+            return f"{head}\n{detail}" if detail else head
+
+        # Auto-new: reset the session so the next message picks up the
+        # preset's toolsets in a clean cache state. _handle_reset_command
+        # evicts the cached agent, fires session hooks, and rotates the
+        # session id. Its own message is dropped - we return our own.
+        await self._handle_reset_command(event)
+        head = f"Preset **{name}** activated - fresh session started."
+        body = f"{head}\n{detail}" if detail else head
+        return f"{body}\n\nType /toolset clear to return to the default toolset."
+
     # ────────────────────────────────────────────────────────────────
     # /goal — persistent cross-turn goals (Ralph-style loop)
     # ────────────────────────────────────────────────────────────────
@@ -23039,7 +23204,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent_cfg = user_config.get("agent") or {}
             from agent.skill_utils import parse_config_string_list
 
-            disabled_toolsets = parse_config_string_list(agent_cfg.get("disabled_toolsets")) or None
+            disabled_toolsets = parse_config_string_list(agent_cfg.get("disabled_toolsets")) or []
+
+            # Toolset preset override: an active preset's toolsets whitelist wins
+            # over the resolved platform tool surface; its disabled_toolsets are
+            # always merged in on top.
+            from hermes_cli.tools_config import (
+                get_active_preset,
+                list_presets,
+                resolve_preset,
+            )
+            _bg_preset_name = get_active_preset(user_config)
+            if _bg_preset_name and _bg_preset_name in list_presets(user_config):
+                _bg_preset_enabled, _bg_preset_disabled, _ = resolve_preset(
+                    _bg_preset_name, user_config,
+                )
+                for ts in _bg_preset_disabled:
+                    if ts not in disabled_toolsets:
+                        disabled_toolsets.append(ts)
+                if _bg_preset_enabled:
+                    enabled_toolsets = list(_bg_preset_enabled)
+
+            disabled_toolsets = disabled_toolsets or None
 
             pr = self._provider_routing
             max_iterations = _current_max_iterations()
@@ -28680,7 +28866,29 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         agent_cfg_local = user_config.get("agent") or {}
         from agent.skill_utils import parse_config_string_list
 
-        disabled_toolsets = parse_config_string_list(agent_cfg_local.get("disabled_toolsets")) or None
+        disabled_toolsets = parse_config_string_list(agent_cfg_local.get("disabled_toolsets")) or []
+
+        # Toolset preset override: when active_preset is set and the preset
+        # provides a non-empty `toolsets` whitelist, it wins over the resolved
+        # platform tool surface. The preset's `disabled_toolsets` are always
+        # merged in on top.
+        from hermes_cli.tools_config import (
+            get_active_preset,
+            list_presets,
+            resolve_preset,
+        )
+        _preset_name = get_active_preset(user_config)
+        if _preset_name and _preset_name in list_presets(user_config):
+            _preset_enabled, _preset_disabled, _ = resolve_preset(
+                _preset_name, user_config,
+            )
+            for ts in _preset_disabled:
+                if ts not in disabled_toolsets:
+                    disabled_toolsets.append(ts)
+            if _preset_enabled:
+                enabled_toolsets = list(_preset_enabled)
+
+        disabled_toolsets = disabled_toolsets or None
 
         display_config = user_config.get("display", {})
         if not isinstance(display_config, dict):

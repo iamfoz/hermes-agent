@@ -10,6 +10,21 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    # Named focused-work modes: each entry combines a tool-surface gate
+    # (toolsets / disabled_toolsets) with an optional skill-bundle
+    # reference (bundle: <name>) and extras (preload_skills). Skill
+    # grouping is delegated to upstream's skill-bundles feature
+    # (~/.hermes/skill-bundles/*.yaml, PR #28373) so presets stay
+    # focused on the work-mode concerns: tool surface, sticky/active
+    # mode, auto-/new on switch. Switched via /toolset <name> or the
+    # --toolset CLI flag; empty by default. See
+    # website/docs/user-guide/features/toolset-presets.md for the
+    # full schema, design rationale, and relationship to bundles.
+    "toolset_presets": {},
+    # Currently active preset name. Empty string means no preset is active;
+    # the agent falls back to platform-level tool config from `hermes tools`.
+    # Set by /toolset <name>, cleared by /toolset clear.
+    "active_preset": "",
     # SQLite journal mode used by every Hermes database opener. WAL is the
     # normal default; set DELETE for weak-fsync/shared filesystems where WAL is
     # not crash-safe (for example macOS virtiofs, NFS, or SMB).

@@ -3433,6 +3433,7 @@ def cmd_chat(args):
         "provider": getattr(args, "provider", None),
         "reasoning": getattr(args, "reasoning", None),
         "toolsets": args.toolsets,
+        "toolset": getattr(args, "toolset", None),
         "skills": getattr(args, "skills", None),
         "verbose": getattr(args, "verbose", None),
         "quiet": getattr(args, "quiet", False),
@@ -12360,6 +12361,30 @@ _BUILTIN_SUBCOMMANDS = frozenset(
 )
 
 
+# Top-level flags that take a value. Needed by ``_first_positional_argv``
+# so that in ``hermes -m gpt5 chat``, ``gpt5`` is correctly skipped as a
+# flag value rather than misclassified as a subcommand. Kept in sync with
+# the top-level flags declared in ``hermes_cli/_parser.py``.
+#
+# Correctness-safe either way: missing an entry here only makes the
+# fast-path bail out too eagerly (we run plugin discovery when we didn't
+# need to); extra entries would make us skip a real positional.
+_TOP_LEVEL_VALUE_FLAGS = frozenset(
+    {
+        "-z", "--oneshot",
+        "-m", "--model",
+        "--provider",
+        "-t", "--toolsets",
+        "--toolset",
+        "-r", "--resume",
+        "-s", "--skills",
+        # ``-c / --continue`` is nargs='?' (optional value). Treat it as
+        # value-taking: if the next token is a subcommand-looking word
+        # the user almost certainly meant it as the session name, and
+        # either interpretation keeps us on the safe side.
+        "-c", "--continue",
+    }
+)
 def _first_positional_argv() -> str | None:
     """Return the first non-flag, non-flag-value token in ``sys.argv[1:]``.
 
@@ -13726,7 +13751,53 @@ def main():
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
 
     # =========================================================================
-    # computer-use command — manage Computer Use (cua-driver)
+    # toolset command - manage toolset presets
+    # =========================================================================
+    toolset_parser = subparsers.add_parser(
+        "toolset",
+        help="Manage toolset presets (focused work modes)",
+        description=(
+            "Toolset presets bundle (enabled toolsets, disabled toolsets,\n"
+            "preload skills) under a name you can switch between with\n"
+            "/toolset <name> from the CLI, Telegram, Discord, etc.\n\n"
+            "Presets are defined under `toolset_presets:` in\n"
+            "~/.hermes/config.yaml. Use `hermes toolset use <name>` to\n"
+            "make a preset sticky across invocations."
+        ),
+    )
+    toolset_sub = toolset_parser.add_subparsers(dest="toolset_action")
+
+    toolset_sub.add_parser(
+        "list",
+        help="List configured presets with descriptions",
+    )
+
+    toolset_use_p = toolset_sub.add_parser(
+        "use",
+        help="Activate a preset (sticky, persists in config.yaml)",
+    )
+    toolset_use_p.add_argument("name", help="Preset name from toolset_presets")
+
+    toolset_show_p = toolset_sub.add_parser(
+        "show",
+        help="Show a preset's resolved fields",
+    )
+    toolset_show_p.add_argument("name", help="Preset name to inspect")
+
+    toolset_sub.add_parser(
+        "clear",
+        help="Deactivate the sticky preset (revert to default toolset)",
+    )
+
+    def cmd_toolset(args):
+        from hermes_cli.toolset_cli import toolset_command
+
+        toolset_command(args)
+
+    toolset_parser.set_defaults(func=cmd_toolset)
+
+    # =========================================================================
+    # computer-use command - manage Computer Use (cua-driver) on macOS
     # =========================================================================
     computer_use_parser = subparsers.add_parser(
         "computer-use",

@@ -9477,6 +9477,182 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         print()
 
 
+    def _handle_toolset_command(self, cmd: str):
+        """Handle /toolset slash command - switch toolset presets.
+
+        Subcommands:
+            /toolset - show usage
+            /toolset list - list available presets
+            /toolset clear - deactivate sticky preset
+            /toolset show <name> - show preset details
+            /toolset <name> - activate preset + auto-new session
+            /toolset <name> --no-new - activate sticky, defer to manual /new
+        """
+        import shlex
+        from hermes_cli.config import load_config, save_config
+        from hermes_cli.tools_config import (
+            _get_platform_tools,
+            get_active_preset,
+            list_presets,
+            resolve_preset,
+        )
+
+        try:
+            parts = shlex.split(cmd)
+        except ValueError:
+            parts = cmd.split()
+        args = parts[1:] if len(parts) > 1 else []
+
+        cfg = load_config()
+        presets = list_presets(cfg)
+
+        if not args:
+            self._toolset_print_status(cfg, presets)
+            return
+
+        sub = args[0]
+
+        if sub == "list":
+            self._toolset_print_status(cfg, presets)
+            return
+
+        if sub == "clear":
+            if not get_active_preset(cfg):
+                _cprint("  No preset active.")
+                return
+            cfg["active_preset"] = ""
+            save_config(cfg)
+            self.enabled_toolsets = sorted(_get_platform_tools(load_config(), "cli"))
+            self.agent = None  # Force _init_agent to rebuild with default toolset
+            self.new_session(silent=True)
+            _cprint("  Toolset preset cleared - default toolset active.")
+            return
+
+        if sub == "show":
+            if len(args) < 2:
+                _cprint("  Usage: /toolset show <name>")
+                return
+            name = args[1]
+            if name not in presets:
+                available = ", ".join(presets) if presets else "(none defined)"
+                _cprint(f"  Unknown preset '{name}'. Available: {available}")
+                return
+            self._toolset_print_details(name, presets[name])
+            return
+
+        # /toolset <name> [--no-new]
+        name = sub
+        flags = args[1:]
+        no_new = "--no-new" in flags
+
+        if name not in presets:
+            available = ", ".join(presets) if presets else "(none defined)"
+            _cprint(f"  Unknown preset '{name}'. Available: {available}")
+            _cprint(f"  {_DIM}Define presets under `toolset_presets:` in ~/.hermes/config.yaml{_RST}")
+            return
+
+        cfg["active_preset"] = name
+        save_config(cfg)
+
+        preset = presets[name]
+        enabled = preset.get("toolsets") or []
+        disabled = preset.get("disabled_toolsets") or []
+        # Resolve through the central helper so the display matches the
+        # effective skill set the session will load (bundle.skills + extras).
+        _, _, skills = resolve_preset(name, cfg)
+
+        if no_new:
+            _cprint(f"  Preset {name} saved. Run /new to activate it.")
+            if enabled:
+                _cprint(f"    Toolsets: {', '.join(enabled)}")
+            if disabled:
+                _cprint(f"    Disabled: {', '.join(disabled)}")
+            if skills:
+                _cprint(f"    Skills: {', '.join(skills)}")
+            return
+
+        # Auto-new path: rebuild enabled_toolsets, drop the cached agent,
+        # rotate the session. The next message creates a fresh agent with
+        # the preset's tools applied.
+        enabled_resolved, _, preload = resolve_preset(name, cfg)
+        if enabled_resolved is None:
+            # No whitelist - fall back to platform default
+            self.enabled_toolsets = sorted(_get_platform_tools(cfg, "cli"))
+        else:
+            self.enabled_toolsets = list(enabled_resolved)
+
+        self.agent = None
+        self.new_session(silent=True)
+
+        _cprint(f"  Preset {name} activated - fresh session started.")
+        if enabled:
+            _cprint(f"    Toolsets: {', '.join(enabled)}")
+        if disabled:
+            _cprint(f"    Disabled: {', '.join(disabled)}")
+        if skills:
+            _cprint(f"    Skills: {', '.join(skills)}")
+        _cprint(f"  {_DIM}Type /toolset clear to return to the default toolset.{_RST}")
+
+    def _toolset_print_status(self, cfg: dict, presets: dict) -> None:
+        """Print active preset and the list of available presets."""
+        from hermes_cli.tools_config import get_active_preset
+
+        active = get_active_preset(cfg)
+        if active:
+            _cprint(f"  Active preset: {active}")
+        else:
+            _cprint("  Active preset: (none - default toolset)")
+        if not presets:
+            _cprint(f"  {_DIM}No presets defined. Add them under `toolset_presets:` in ~/.hermes/config.yaml.{_RST}")
+            return
+        _cprint("")
+        for name, preset in presets.items():
+            if not isinstance(preset, dict):
+                continue
+            marker = "*" if name == active else " "
+            desc = preset.get("description", "")
+            tools = preset.get("toolsets") or []
+            tools_str = ", ".join(tools) if tools else "default toolset"
+            if desc:
+                _cprint(f"  {marker} {name} - {desc} ({tools_str})")
+            else:
+                _cprint(f"  {marker} {name} ({tools_str})")
+        _cprint("")
+        _cprint(f"  {_DIM}/toolset <name> to switch (auto-starts new session){_RST}")
+        _cprint(f"  {_DIM}/toolset <name> --no-new to switch without new session{_RST}")
+        _cprint(f"  {_DIM}/toolset clear to deactivate{_RST}")
+
+    def _toolset_print_details(self, name: str, preset: dict) -> None:
+        """Print the resolved fields of a single preset."""
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import (
+            resolve_preset as _resolve_preset,
+            preset_bundle_instruction,
+        )
+        desc = preset.get("description", "")
+        tools = preset.get("toolsets") or []
+        disabled = preset.get("disabled_toolsets") or []
+        bundle = str(preset.get("bundle") or "").strip()
+        extras = preset.get("preload_skills") or []
+        # Resolve through the central helper so what we display matches
+        # what activation will load: bundle.skills + extras, deduped.
+        _cfg = load_config()
+        _, _, effective_skills = _resolve_preset(name, _cfg)
+        instruction = preset_bundle_instruction(name, _cfg)
+        _cprint(f"  Preset: {name}")
+        if desc:
+            _cprint(f"  Description: {desc}")
+        _cprint(f"  Toolsets: {', '.join(tools) if tools else 'default'}")
+        _cprint(f"  Disabled: {', '.join(disabled) if disabled else '(none)'}")
+        _cprint(f"  Bundle: {bundle or '(none)'}")
+        if extras:
+            _cprint(f"  Extra skills: {', '.join(extras)}")
+        _cprint(f"  Effective skills: {', '.join(effective_skills) if effective_skills else '(none)'}")
+        if instruction:
+            first_line = instruction.splitlines()[0]
+            suffix = "" if first_line == instruction else " [...]"
+            _cprint(f"  Bundle instruction: {first_line}{suffix}")
+
     def show_toolsets(self):
         """Display available toolsets with kawaii ASCII art."""
         all_toolsets = get_all_toolsets()
@@ -12031,6 +12207,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._handle_profile_command()
         elif canonical == "tools":
             self._handle_tools_command(cmd_original)
+        elif canonical == "toolset":
+            self._handle_toolset_command(cmd_original)
         elif canonical == "toolsets":
             self.show_toolsets()
         elif canonical == "config":
@@ -21066,6 +21244,7 @@ def main(
     q: str = None,
     image: str = None,
     toolsets: str = None,
+    toolset: str = None,
     skills: str | list[str] | tuple[str, ...] = None,
     model: str = None,
     provider: str = None,
@@ -21228,6 +21407,31 @@ def main(
     # Handle query shorthand
     query = query or q
     
+    # Toolset preset resolution. CLI --toolset flag wins over the sticky
+    # active_preset in config.yaml for this invocation. Resolves to the
+    # preset's whitelist + disabled list + preload skills, which get
+    # merged with --toolsets and --skills below.
+    from hermes_cli.tools_config import (
+        _get_platform_tools,
+        get_active_preset,
+        list_presets,
+        resolve_preset,
+    )
+    preset_name = (toolset or "").strip() or get_active_preset(CLI_CONFIG)
+    preset_enabled: list[str] | None = None
+    preset_disabled: list[str] = []
+    preset_preload: list[str] = []
+    if preset_name:
+        if preset_name in list_presets(CLI_CONFIG):
+            preset_enabled, preset_disabled, preset_preload = resolve_preset(
+                preset_name, CLI_CONFIG,
+            )
+        else:
+            print(
+                f"Warning: preset '{preset_name}' not found - using default toolset."
+            )
+            preset_name = ""
+
     # Parse toolsets - handle both string and tuple/list inputs
     # Default to hermes-cli toolset which includes cronjob management tools
     toolsets_list = None
@@ -21242,6 +21446,10 @@ def main(
                     toolsets_list.extend([x.strip() for x in t.split(",")])
                 else:
                     toolsets_list.append(str(t))
+    elif preset_enabled is not None:
+        # Preset whitelist wins over the platform default when --toolsets
+        # was not explicitly passed.
+        toolsets_list = list(preset_enabled)
     else:
         # Coding posture (base Hermes): with no explicit --toolsets, collapse
         # to the coding toolset (+ enabled MCP servers) when sitting in a code
@@ -21258,8 +21466,16 @@ def main(
             # Use the shared resolver so MCP servers are included at runtime
             from hermes_cli.tools_config import _get_platform_tools
             toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
-    
+
+
     parsed_skills = _parse_skills_argument(skills)
+    # Merge preset preload_skills with --skills (preset additions go last so
+    # the user-typed --skills load first; build_preloaded_skills_prompt
+    # dedupes on identifier).
+    if preset_preload:
+        parsed_skills = list(parsed_skills) + [
+            s for s in preset_preload if s not in parsed_skills
+        ]
 
     # Create CLI instance
     cli = HermesCLI(
@@ -21278,6 +21494,14 @@ def main(
         pass_session_id=pass_session_id,
         ignore_rules=ignore_rules,
     )
+
+    if preset_disabled:
+        # Merge preset disabled list with config's agent.disabled_toolsets.
+        # Always-disabled toolsets from cron etc. live in cron.scheduler and
+        # are independent of presets.
+        cli.disabled_toolsets = list(
+            dict.fromkeys((cli.disabled_toolsets or []) + preset_disabled)
+        )
 
     if parsed_skills:
         # Load the skill payloads in the background: skill_view walks the

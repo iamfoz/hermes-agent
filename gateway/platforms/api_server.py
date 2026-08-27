@@ -2869,7 +2869,12 @@ class APIServerAdapter(BasePlatformAdapter):
             _load_gateway_config,
             GatewayRunner,
         )
-        from hermes_cli.tools_config import _get_platform_tools
+        from hermes_cli.tools_config import (
+            _get_platform_tools,
+            get_active_preset,
+            list_presets,
+            resolve_preset,
+        )
 
         # Catch RuntimeError ONLY around this call, not the wider
         # _create_agent()+run_conversation() span --
@@ -3091,7 +3096,17 @@ class APIServerAdapter(BasePlatformAdapter):
                 self._last_resolved_model["*"] = model
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+
+        # Toolset preset takes precedence over the platform config when an
+        # `active_preset` is set in config.yaml.
+        _api_preset_name = get_active_preset(user_config)
+        _api_preset_enabled: list[str] | None = None
+        if _api_preset_name and _api_preset_name in list_presets(user_config):
+            _api_preset_enabled, _, _ = resolve_preset(_api_preset_name, user_config)
+        if _api_preset_enabled is not None:
+            enabled_toolsets = list(_api_preset_enabled)
+        else:
+            enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = _current_max_iterations()
 
