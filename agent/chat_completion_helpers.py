@@ -1600,7 +1600,11 @@ def interruptible_api_call(agent, api_kwargs: dict):
     _call_start = time.time()
     agent._touch_activity("waiting for non-streaming API response")
 
-    t = threading.Thread(target=_context_thread_target(_call), daemon=True)
+    def _gated_call():
+        from agent.concurrency_gate import acquire as _gate_acquire
+        with _gate_acquire(agent.base_url or agent.provider):
+            _call()
+    t = threading.Thread(target=_context_thread_target(_gated_call), daemon=True)
     t.start()
     _poll_count = 0
     while t.is_alive():
@@ -3572,8 +3576,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
 
         _emit_stream_start()
         try:
+            def _gated_bedrock_call():
+                from agent.concurrency_gate import acquire as _gate_acquire
+                with _gate_acquire(agent.base_url or agent.provider):
+                    _bedrock_call()
             t = threading.Thread(
-                target=_context_thread_target(_bedrock_call), daemon=True
+                target=_context_thread_target(_gated_bedrock_call), daemon=True
             )
             t.start()
             while t.is_alive():
@@ -5140,7 +5148,11 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         if _reasoning_floor is not None:
             _stream_stale_timeout = max(_stream_stale_timeout, _reasoning_floor)
 
-    t = threading.Thread(target=_context_thread_target(_call), daemon=True)
+    def _gated_call():
+        from agent.concurrency_gate import acquire as _gate_acquire
+        with _gate_acquire(agent.base_url or agent.provider):
+            _call()
+    t = threading.Thread(target=_context_thread_target(_gated_call), daemon=True)
     t.start()
     _last_heartbeat = time.time()
     _HEARTBEAT_INTERVAL = 30.0  # seconds between gateway activity touches

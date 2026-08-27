@@ -2623,6 +2623,12 @@ def init_agent(
     agent._custom_providers = _custom_providers
     _merge_custom_provider_extra_body(agent, _custom_providers)
 
+    try:
+        from agent.concurrency_gate import configure_from_custom_providers
+        configure_from_custom_providers(_custom_providers)
+    except Exception as _cg_err:
+        logger.debug("concurrency_gate configuration skipped: %s", _cg_err)
+
     # Check custom_providers per-model context_length
     if _config_context_length is None and _custom_providers:
         try:

@@ -1426,7 +1426,7 @@ def _normalize_custom_provider_entry(
         "key_cmd",
         "api_mode", "transport", "model", "default_model", "models",
         "models_discovered",
-        "context_length", "rate_limit_delay",
+        "context_length", "rate_limit_delay", "max_parallel_requests",
         "request_timeout_seconds", "stale_timeout_seconds",
         "discover_models", "extra_body", "extra_headers",
         "ssl_ca_cert", "ssl_verify",
@@ -1565,6 +1565,10 @@ def _normalize_custom_provider_entry(
     rate_limit_delay = entry.get("rate_limit_delay")
     if isinstance(rate_limit_delay, (int, float)) and rate_limit_delay >= 0:
         normalized["rate_limit_delay"] = rate_limit_delay
+
+    max_parallel_requests = entry.get("max_parallel_requests")
+    if isinstance(max_parallel_requests, int) and max_parallel_requests > 0:
+        normalized["max_parallel_requests"] = max_parallel_requests
 
     discover_models = entry.get("discover_models")
     if isinstance(discover_models, bool):
