@@ -38,7 +38,7 @@ class MicrosoftGraphClient:
     alike): transport errors back off exponentially; 401 clears the token cache and
     refetches; 429/5xx honor ``Retry-After``. Each attempt uses a fresh ``AsyncClient``."""
 
-    def __init__(self, token_provider: MicrosoftGraphTokenProvider, *,
+    def __init__(self, token_provider: Any, *,
                  base_url: str = DEFAULT_GRAPH_BASE_URL, timeout: float = 60.0, max_retries: int = 3,
                  transport: httpx.AsyncBaseTransport | None = None,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
