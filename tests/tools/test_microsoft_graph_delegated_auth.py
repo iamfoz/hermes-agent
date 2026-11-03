@@ -93,10 +93,10 @@ class TestMicrosoftGraphDelegatedTokenProvider:
                     "interval": 1,
                 })
             elif call_count[0] == 2:
-                # First poll — pending
+                # First poll - pending
                 return httpx.Response(400, json={"error": "authorization_pending"})
             else:
-                # Second poll — success
+                # Second poll - success
                 return httpx.Response(200, json={
                     "access_token": "at-1",
                     "refresh_token": refresh_token,
@@ -202,7 +202,7 @@ class TestMicrosoftGraphDelegatedTokenProvider:
     async def test_file_cache_is_used_across_runs(self):
         """Token is loaded from file when in-memory cache is empty."""
         def handler(request: httpx.Request) -> httpx.Response:
-            raise RuntimeError("Should not be called — token should come from file")
+            raise RuntimeError("Should not be called - token should come from file")
 
         # Write a valid token to the cache file
         now = 9_999_999_999

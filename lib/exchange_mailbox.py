@@ -32,7 +32,7 @@ import textwrap
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-# VIPs — high priority senders
+# VIPs - high priority senders
 def _load_vips() -> set:
     """Sender names or domains to treat as VIPs, one per line, kept out of the repo."""
     path = os.path.expanduser(
@@ -373,14 +373,14 @@ async def async_main() -> None:
 
         key = f"p{priority}"
         if key in summary:
-            # For P3, just count — don't store individual messages
+            # For P3, just count - don't store individual messages
             if priority < 3:
                 summary[key].append(msg)
 
     output_lines = []
 
     if summary["p0"]:
-        output_lines.append("## P0 — Immediate action required")
+        output_lines.append("## P0 - Immediate action required")
         for msg in summary["p0"]:
             subject = msg.get("subject", "No subject")
             sender = msg.get("sender", {}).get("emailAddress", {}).get("address", "unknown")
@@ -390,7 +390,7 @@ async def async_main() -> None:
                 output_lines.append(f"  > {preview}")
 
     if summary["p1"]:
-        output_lines.append("\n## P1 — This week")
+        output_lines.append("\n## P1 - This week")
         for msg in summary["p1"]:
             subject = msg.get("subject", "No subject")
             sender = msg.get("sender", {}).get("emailAddress", {}).get("address", "unknown")
@@ -400,7 +400,7 @@ async def async_main() -> None:
         1 for msg in messages if classify_priority(calculate_score(msg))[0] == 3
     )
     if p3_count > 0:
-        output_lines.append(f"\nP3 — Cleaned up {p3_count} automated/low-value messages")
+        output_lines.append(f"\nP3 - Cleaned up {p3_count} automated/low-value messages")
 
     if output_lines:
         print("\n".join(output_lines))
