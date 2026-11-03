@@ -1054,6 +1054,9 @@ _EMPTY_TOOL_RESPONSE_NUDGE = (
     "You just executed tool calls but returned an empty response. Please process the tool "
     "results above and continue with the task."
 )
+# Stable head of the second post-tool nudge, whose body reinjects tool-result previews;
+# the compressor matches this prefix to drop it as scaffolding.
+_EMPTY_TOOL_RESPONSE_SUMMARY_NUDGE_PREFIX = "You just executed tool calls but didn't process the results. "
 
 
 
