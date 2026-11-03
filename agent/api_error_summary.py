@@ -40,6 +40,40 @@ def is_provider_stream_parse_error(error: BaseException) -> bool:
             and any(marker in str(error).lower() for marker in PROVIDER_STREAM_PARSE_MARKERS))
 
 
+def _summarize_sse_error_frames(raw: str, prefix: str) -> Optional[str]:
+    """Surface the upstream error from SSE ``data: {...}`` frames (jmunch-mcp gateway 502s).
+
+    Returns None unless a frame carries an ``error`` dict, so the caller falls through to its
+    generic summary instead of showing an opaque ``HTTP 502: data: {...}``.
+    """
+    if "data:" not in raw or not ("UPSTREAM_ERROR" in raw or '"code"' in raw):
+        return None
+    for line in raw.split("\n"):
+        if not line.startswith("data: "):
+            continue
+        try:
+            parsed = json.loads(line[6:])
+        except json.JSONDecodeError:
+            continue
+        err = parsed.get("error") if isinstance(parsed, dict) else None
+        if not isinstance(err, dict):
+            continue
+        detail = err.get("detail")
+        upstream_status = detail.get("status", "") if isinstance(detail, dict) else ""
+        msg = err.get("message") or ""
+        parts = []
+        if upstream_status:
+            parts.append(f"upstream returned HTTP {upstream_status}")
+        if msg:
+            parts.append(str(msg)[:300])
+        result = f"{prefix}{'; '.join(parts)}"
+        upstream_code = err.get("code")
+        if upstream_code and str(upstream_code) not in result:
+            result = f"{result} ({upstream_code})"
+        return result
+    return None
+
+
 # Offline DNS failures are wrapped in a generic "Connection error" by SDKs — inspect the chain.
 _NETWORK_RESOLUTION_MARKERS = (
     "temporary failure in name resolution",
@@ -219,6 +253,10 @@ class ApiErrorSummaryMixin:
             if msg:
                 msg = ApiErrorSummaryMixin._coerce_api_error_detail(msg)
                 return ApiErrorSummaryMixin._decorate_xai_entitlement_error(f"{prefix}{msg[:300]}")
+
+        sse_summary = _summarize_sse_error_frames(raw, prefix)
+        if sse_summary is not None:
+            return redact_sensitive_text(sse_summary)
 
         # SDK may leave body empty while httpx has the payload. Redact: the body is attacker-influenced
         # and may echo Authorization / x-api-key / request JSON.
