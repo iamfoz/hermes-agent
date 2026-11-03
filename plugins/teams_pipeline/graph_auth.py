@@ -348,7 +348,7 @@ class MicrosoftGraphDelegatedTokenProvider:
             try:
                 return await self._refresh_access_token(refresh_token)
             except MicrosoftGraphTokenError:
-                # Refresh failed — fall through to device code flow
+                # Refresh failed - fall through to device code flow
                 pass
 
         return await self._device_code_flow()
