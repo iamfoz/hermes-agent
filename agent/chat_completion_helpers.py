@@ -32,6 +32,7 @@ from agent.error_classifier import (
 from agent.sdk_transform_bypass import bypass_chat_sdk_request_transform
 from agent.errors import EmptyStreamError
 from agent.chat_completion_local import _streams_llamacpp, stale_giveup
+from agent.concurrency_gate import gated
 from agent.chat_completion_headers import _chat_completion_capturing_headers
 from agent.chat_completion_stream_monitor import StreamingWaitMonitor, StreamLifetimeExceeded
 from agent.transports.chat_completions import is_router_timeout_shim, router_timeout_shim_may_follow
@@ -2605,7 +2606,7 @@ class _BedrockStream:
             f"— aborting stalled stream so the retry/fallback path can recover.")
 
     def _poll(self):
-        t = threading.Thread(target=_context_thread_target(self._worker), daemon=True)
+        t = threading.Thread(target=_context_thread_target(gated(self.agent, self._worker)), daemon=True)
         t.start()
         while t.is_alive():
             t.join(timeout=0.3)
@@ -3884,7 +3885,7 @@ class _StreamingCall(StreamingWaitMonitor):
             finally:
                 monitor.join(timeout=2.0)
         else:
-            self.worker = threading.Thread(target=_context_thread_target(self._run_call), daemon=True)
+            self.worker = threading.Thread(target=_context_thread_target(gated(self.agent, self._run_call)), daemon=True)
             self.worker.start()
             self._monitor_loop()
         if self._monitor_interrupted["yes"]:
