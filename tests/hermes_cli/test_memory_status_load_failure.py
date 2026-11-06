@@ -184,3 +184,5 @@ def test_status_dir_present_but_nothing_registered(tmp_path, monkeypatch, capsys
     assert "no provider registered (see the log)" in out
     assert "NOT installed" not in out
     assert "Install the 'demo_empty' memory plugin" not in out
+    # The list badge agrees with the detail block even without a recorded reason.
+    assert "• demo_empty  (installed, failed to load ✗) ← active" in out
