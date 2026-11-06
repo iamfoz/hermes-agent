@@ -258,7 +258,6 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-
 from hermes_cli.main_resume_args import apply_in_dir as _apply_in_dir
 from hermes_cli.subcommands.cron import build_cron_parser
 from hermes_cli.subcommands.gateway import build_gateway_parser
@@ -306,6 +305,7 @@ from hermes_cli.subcommands.mcp import build_mcp_parser
 from hermes_cli.subcommands.connectors import build_connectors_parser
 from hermes_cli.subcommands.vault import build_vault_parser
 from hermes_cli.subcommands.moa import build_moa_parser
+from hermes_cli.subcommands.toolset import build_toolset_parser
 from hermes_cli.subcommands.fallback import build_fallback_parser
 from hermes_cli.subcommands.worktree import build_worktree_parser
 from hermes_cli.subcommands.browser import build_browser_parser
@@ -1568,7 +1568,7 @@ def cmd_chat(args):
         "ignore_rules": getattr(args, "ignore_rules", False) or safe_mode,
         "ignore_user_config": getattr(args, "ignore_user_config", False) or safe_mode,
         "compact": getattr(args, "compact", False),
-        **{k: getattr(args, k, d) for k, d in _CHAT_PASSTHROUGH + (("api_key", None), ("base_url", None))},
+        **{k: getattr(args, k, d) for k, d in _CHAT_PASSTHROUGH + (("api_key", None), ("base_url", None), ("toolset", None))},
     }
     kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
@@ -2233,7 +2233,6 @@ def cmd_update(args):
         _finalize_update_output(_update_io_state)
 
 
-
 def _coalesce_session_name_args(argv: list) -> list:
     """Join unquoted multi-word session names after -c/--continue and -r/--resume: ``hermes -c Pokemon
     Agent Dev`` → ``['-c', 'Pokemon Agent Dev']``, up to the next flag or known top-level subcommand."""
@@ -2545,7 +2544,7 @@ _BUILTIN_SUBCOMMANDS = frozenset(
         "journey", "memory-graph", "learning",
         "model", "monitoring", "pairing", "pause", "peer", "pets", "plugins", "portal", "profile",
         "project", "proxy", "prompt-size", "resume", "send", "sessions", "setup",
-        "skin", "skills", "slack", "status", "tools", "uninstall", "update",
+        "skin", "skills", "slack", "status", "tools", "toolset", "uninstall", "update",
         "usage", "vault",
         "webhook", "whatsapp", "whatsapp-cloud", "worktree", "chat", "secrets", "security",
         "browser",
@@ -3152,6 +3151,7 @@ def _build_cli_parser():
     build_journey_parser(subparsers)
     build_memory_parser(subparsers, cmd_memory=cmd_memory)
     build_tools_parser(subparsers, cmd_tools=cmd_tools)
+    build_toolset_parser(subparsers)
     build_computer_use_parser(subparsers)
     build_mcp_parser(subparsers, cmd_mcp=cmd_mcp)
     build_connectors_parser(subparsers)

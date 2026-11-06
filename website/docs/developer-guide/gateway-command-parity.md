@@ -26,7 +26,7 @@ narrower routes (`hermes_cli/gateway_chat_commands.py`).
 setting to this local session (its next turn and `config.get`), saving config.yaml only where the
 handler does; `client-local (cli_only)` commands are terminal/UI features of a client.
 
-105 registry commands: 29 control, 19 read, 57 refused.
+106 registry commands: 29 control, 19 read, 58 refused.
 
 | Command | Gateway (`slash.exec`) | Classic CLI | Ink | Desktop | ACP | Notes |
 |---|---|---|---|---|---|---|
@@ -122,6 +122,7 @@ handler does; `client-local (cli_only)` commands are terminal/UI features of a c
 | `/timestamps` (/ts) | refused | HermesCLI._handle_timestamps_command | config.set | action: timestamps | slash.exec: refused | client-local (cli_only) |
 | `/title` | control | HermesCLI._cmd_title | canonical route | action: title | session.mutate rename (bare: slash.exec) |  |
 | `/tools` | refused | HermesCLI._handle_tools_command | refused: not available yet | slash.exec: refused | session.info | client-local (cli_only) |
+| `/toolset` (/preset) | refused | HermesCLI._handle_toolset_command | slash.exec: refused | unavailable: terminal | slash.exec: refused |  |
 | `/toolsets` | read | HermesCLI.show_toolsets | slash.exec | unavailable: terminal | slash.exec | client-local (cli_only) |
 | `/topic` | refused | messaging-only: unknown command | slash.exec: refused | slash.exec: refused | slash.exec: refused | messaging-only |
 | `/topup` | read | HermesCLI._show_billing | sidecar: billing.state | slash.exec | slash.exec |  |
