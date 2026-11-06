@@ -303,7 +303,7 @@ def stage_tool_call_message(
         agent._empty_content_retries = 0
     # Re-arm the post-tool nudge so it can fire on a LATER tool round; a landed tool call
     # recovers any dropped-tool-call stall, so refresh that budget per stall.
-    agent._post_tool_empty_retried = False
+    agent._post_tool_empty_retries = 0
     agent._dropped_toolcall_retries = 0
 
     previous_msg = messages[-1] if messages else None
