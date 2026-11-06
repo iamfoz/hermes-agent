@@ -494,11 +494,22 @@ def cmd_status(args) -> None:
         print("\n  Installed plugins:")
         for pname, desc, prov in providers:
             active = " ← active" if pname == provider_name else ""
-            # The failed marker requires a RECORDED reason: a None instance with no recorded
-            # reason is the "register() ran but registered nothing" / host-unavailable case, which
-            # the detail section explains on its own and the log line already names.
-            failed = prov is None and load_failure_reason(pname) is not None
-            label = "installed, failed to load ✗" if failed else desc
+            if prov is None:
+                from plugins.memory import parked_provider_notice
+                if parked_provider_notice(pname):
+                    # Parked (disabled) provider: the detail block explains it; the failed
+                    # badge would be a different (wrong) diagnosis.
+                    label = "turned off"
+                elif load_failure_reason(pname) is not None or find_provider_dir(pname) is not None:
+                    # Failed to load, badge agrees with the detail block whether or not a
+                    # reason was recorded: recorded reason -> that reason; a directory with no
+                    # recorded reason -> "no provider registered (see the log)". A pip provider
+                    # has no directory, so it needs the recorded reason to qualify.
+                    label = "installed, failed to load ✗"
+                else:
+                    label = desc
+            else:
+                label = desc
             print(f"    • {pname}  ({label}){active}")
     print()
 
