@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.context_engine import automatic_compaction_status_message
 from agent.conversation_compression import (
-    IDLE_COMPACTION_STATUS_TEMPLATE, PREFLIGHT_COMPRESSION_STATUS_TEMPLATE,
+    IDLE_COMPACTION_STATUS_TEMPLATE,
     compression_skipped_due_to_lock, conversation_history_after_compression,
 )
 
@@ -361,17 +361,10 @@ def _run_preflight_passes(
     # Compression is actually running — reset the dedup so a future blocked turn can
     # warn again.
     _clear_overflow_warn(agent)
-    logger.info(
-        "Preflight compression: ~%s tokens >= %s threshold (model %s, ctx %s)",
-        f"{_preflight_tokens:,}", f"{_compressor.threshold_tokens:,}", agent.model,
-        f"{_compressor.context_length:,}",
-    )
     _preflight_status = automatic_compaction_status_message(
         _compressor,
         phase="preflight",
-        default_message=PREFLIGHT_COMPRESSION_STATUS_TEMPLATE.format(
-            tokens=_preflight_tokens, threshold=_compressor.threshold_tokens
-        ),
+        default_message="",
         approx_tokens=_preflight_tokens,
         threshold_tokens=_compressor.threshold_tokens,
         context_length=_compressor.context_length,
