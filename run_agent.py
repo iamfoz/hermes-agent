@@ -911,6 +911,8 @@ class AIAgent(
             turn_author = getattr(self, "_turn_author", None)
             if turn_author is not None:
                 sync_kwargs["turn_author"] = turn_author
+            # Before sync_all: providers credit existing recalls before persisting the new turn.
+            self._memory_manager.notify_recall_used(response_text, session_id=self.session_id or "")
             self._memory_manager.sync_all(user_text, response_text, **sync_kwargs)
             # Sibling of the build_turn_context() prefetch gate: don't key recall on zero-signal prompts.
             if not is_trivial_prompt(user_text):

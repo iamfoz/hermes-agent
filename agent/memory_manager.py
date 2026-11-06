@@ -84,6 +84,16 @@ def _accepts_require_checkpoint(fn: Callable[..., Any]) -> bool:
     return _has_var_kwargs(params) or kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
 
 
+def _provider_overrides(provider: MemoryProvider, hook: str) -> bool:
+    """Whether ``provider``'s class overrides the ABC's default ``hook`` (resolved through the MRO)."""
+    return getattr(type(provider), hook, None) is not getattr(MemoryProvider, hook, None)
+
+
+def _provider_overrides_before_prompt_build(provider: MemoryProvider) -> bool:
+    """Providers that override ``before_prompt_build`` get it INSTEAD of ``prefetch`` (no double injection)."""
+    return _provider_overrides(provider, "before_prompt_build")
+
+
 # -- Provider egress scrubbing -----------------------------------------------
 
 def _scrub(text: str) -> str:
@@ -259,7 +269,8 @@ class MemoryManager:
         return not self._providers or caller_scope(self._bound_scope, f"hook {hook}") is not None
 
     def _fork_turn_hooks_suppressed(self) -> bool:
-        """A fork's writes and recall (on_turn_start, sync, prefetch, session-end extraction, delegation notes)
+        """A fork's writes and recall (on_turn_start, sync, prefetch, the before_prompt_build / on_recall_used /
+        on_tool_call_observed hooks, session-end extraction, delegation notes)
         stay off on the host, independent of whether each provider honours ``agent_context``: before the
         checkpoint gate armed them, forks ran with no provider at all. ``initialize``, ``on_session_switch``
         and ``on_pre_compress`` (the checkpoint) are not gated."""
@@ -358,7 +369,8 @@ class MemoryManager:
     _strip_skill_scaffolding = staticmethod(extract_user_instruction_from_skill_message)
 
     def prefetch_all(self, query: str, *, session_id: str = "") -> str:
-        """Merge non-empty prefetch context from all providers (failures are non-fatal)."""
+        """Merge non-empty prefetch context from all providers (failures are non-fatal). Providers that
+        override ``before_prompt_build`` are skipped: :meth:`build_dynamic_system_prompt` serves them."""
         if self._fork_turn_hooks_suppressed():
             return ""
         clean_query = self._strip_skill_scaffolding(query)
@@ -367,8 +379,53 @@ class MemoryManager:
         clean_query = _redact_for_provider(clean_query)
         parts = self._each_provider(
             "prefetch failed (non-fatal)", lambda p: self._prefetch_provider(p, clean_query, session_id=session_id),
+            providers=[p for p in self._providers if not _provider_overrides_before_prompt_build(p)],
         )
         return "\n\n".join(p for p in parts if p and p.strip())
+
+    def build_dynamic_system_prompt(self, turn_state: dict[str, Any]) -> str:
+        """Join the per-turn ``before_prompt_build`` blocks of the providers that override it ("" if none).
+
+        Despite the name the result never enters the system prompt: the turn prologue folds it into the
+        current user turn's injected memory context, behind the cached prefix (prompt-caching invariant).
+        """
+        providers = [p for p in self._providers if _provider_overrides_before_prompt_build(p)]
+        if not providers or self._fork_turn_hooks_suppressed() or not self._owner_allows("before_prompt_build"):
+            return ""
+        # The profile the providers are bound to is the authoritative agent identity.
+        state = {"agent_id": str((self._bound_scope or {}).get("agent_identity") or ""), **turn_state}
+        query = self._strip_skill_scaffolding(str(state.get("query") or ""))
+        state["query"] = _redact_for_provider(query) if query else ""
+        blocks = self._each_provider(
+            "before_prompt_build failed (non-fatal)", lambda p: p.before_prompt_build(dict(state)), providers=providers,
+        )
+        return "\n\n".join(b for b in blocks if isinstance(b, str) and b.strip())
+
+    def notify_recall_used(self, response_text: str, *, session_id: str = "") -> None:
+        """Fan ``on_recall_used`` out once per completed turn (best-effort, failures logged at debug)."""
+        providers = [p for p in self._providers if _provider_overrides(p, "on_recall_used")]
+        if (not providers or not response_text or self._fork_turn_hooks_suppressed()
+                or not self._owner_allows("on_recall_used")):
+            return
+        response_text = _redact_for_provider(response_text)
+        self._each_provider(
+            "on_recall_used failed (non-fatal)",
+            lambda p: p.on_recall_used(response_text, session_id=session_id), providers=providers,
+        )
+
+    def notify_tool_call(self, tool_name: str, args: dict[str, Any], result: Any, *,
+                         session_id: str = "", success: bool = True) -> None:
+        """Fan ``on_tool_call_observed`` out after an executed tool call (best-effort, failures logged at
+        debug). Args and result are provider egress and are scrubbed; skipped when nobody listens."""
+        providers = [p for p in self._providers if _provider_overrides(p, "on_tool_call_observed")]
+        if not providers or self._fork_turn_hooks_suppressed() or not self._owner_allows("on_tool_call_observed"):
+            return
+        args, result = _redact_for_provider(args if isinstance(args, dict) else {}, result)
+        self._each_provider(
+            "on_tool_call_observed failed (non-fatal)",
+            lambda p: p.on_tool_call_observed(tool_name, args, result, session_id=session_id, success=success),
+            providers=providers,
+        )
 
     def _prefetch_provider(self, provider: MemoryProvider, query: str, *, session_id: str = "") -> str:
         """Run one provider's prefetch; external providers are bounded by a timeout. A stuck external

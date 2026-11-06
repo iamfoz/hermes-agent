@@ -146,6 +146,17 @@ class MemoryProvider(ABC):
         in the background and return cached results; ``session_id`` scopes concurrent sessions."""
         return ""
 
+    def before_prompt_build(self, turn_state: dict[str, Any]) -> str:
+        """Per-turn dynamic context block, the alternative to :meth:`prefetch` ("" if none).
+
+        Called once per turn before the first API call. Overriding it SKIPS this provider's
+        ``prefetch`` (one injection point, never both). The block rides the current turn's
+        user message behind the cached prefix, never the byte-stable system prompt
+        (prompt-caching invariant), and is replayed verbatim on later turns. ``turn_state``
+        keys: ``query``, ``session_id``, ``parent_session_id``, ``turn_number``, ``model``,
+        ``platform``, ``agent_id``. Must be fast, like ``prefetch``."""
+        return ""
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall after each turn; prefetch() consumes it next turn."""
 
@@ -204,6 +215,19 @@ class MemoryProvider(ABC):
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs) -> None:
         """PARENT-side observation of a completed delegation (the subagent has no provider session)."""
+
+    def on_recall_used(self, response_text: str, *, session_id: str = "") -> None:
+        """Once per completed turn, before ``sync_turn``: credit the recalls this turn injected that
+        ``response_text`` actually used (anchor match, similarity, ...). Distinct from ``sync_turn``,
+        which persists the exchange as new memory. Runs inline: keep it cheap."""
+
+    def on_tool_call_observed(
+        self, tool_name: str, args: dict[str, Any], result: Any, *, session_id: str = "", success: bool = True,
+    ) -> None:
+        """After every executed tool call (any tool, not only this provider's; blocked calls never ran
+        and are not reported). ``result`` is usually a string but may be a multimodal dict: coerce
+        with ``str()``. ``success`` is False for error results. Runs inline on the agent thread:
+        offload real work through :func:`spawn_context_thread`."""
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         """Setup fields for ``hermes memory setup`` ([] if none): ``key``, ``description``,
