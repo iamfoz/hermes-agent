@@ -774,7 +774,7 @@ def _launchd_bootstrap_and_kickstart(plist_path: Path, label: str) -> bool:
 
 def _launchd_ok(message: str) -> None:
     """Print a launchd success line and clear the unsupported marker (an OS fix recovers automatically)."""
-    print(message)
+    print(message, flush=True)
     _gw()._clear_launchd_unsupported_marker()
 
 
