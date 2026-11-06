@@ -200,6 +200,24 @@ def assemble_api_request(
     # No send-time pad loop here: ``repair_empty_non_final_messages`` (inside
     # ``_sanitize_api_messages``) is the single owner of empty-turn repair.
 
+    # Safety net: compression or session resume can strip every user message, and
+    # providers like Airrouter/litellm then 400 "No user query found in messages"
+    # (surfaced as a 502 by the jmunch gateway). Inject a continuation prompt BEFORE
+    # the cache plan so the injected row is part of what is cached and measured.
+    if not any(m.get("role") == "user" for m in api_messages):
+        api_messages.append({
+            "role": "user",
+            "content": (
+                "[System: please continue the conversation from your last response, "
+                "taking the next appropriate action or providing a final response "
+                "to the user.]"
+            ),
+        })
+        request_logger.info(
+            "Injected continuation prompt: no user messages found in api_messages (session=%s)",
+            agent.session_id or "-",
+        )
+
     # Build the request-local cache sections LAST, after every transcript mutation;
     # the canonical tool registry stays undecorated. Marked ``content`` becomes text
     # blocks the whitespace pass skips, so the same row's bytes vary across turns.
