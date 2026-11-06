@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Optional
@@ -508,12 +509,24 @@ def parse_model_flags_detailed(raw_args: str) -> ModelFlagParseResult:
     flags: dict[str, bool] = dict.fromkeys(_BOOL_FLAGS.values(), False)
     values: dict[str, str] = dict.fromkeys(_VALUE_FLAGS.values(), "")
     filtered: list[str] = []
-    tokens = iter(raw_args.split())
-    for tok in tokens:
+    tokens = deque(raw_args.split())
+    while tokens:
+        tok = tokens.popleft()
         if tok in _BOOL_FLAGS:
             flags[_BOOL_FLAGS[tok]] = True
-        elif tok in _VALUE_FLAGS and (value := next(tokens, None)) is not None:
-            values[_VALUE_FLAGS[tok]] = value
+        elif tok == "--provider" and tokens and not tokens[0].startswith("--"):
+            # Greedy: multi-word saved provider names (``airouter JMunch``) arrive unquoted from
+            # Telegram/Discord, so take every token up to the next ``--`` flag. Joining on one
+            # space normalises whitespace runs to match how custom_providers names are stored.
+            words = []
+            while tokens and not tokens[0].startswith("--"):
+                words.append(tokens.popleft())
+            value = " ".join(words)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1].strip()
+            values["explicit_provider"] = value
+        elif tok in _VALUE_FLAGS and tokens:
+            values[_VALUE_FLAGS[tok]] = tokens.popleft()
         else:
             filtered.append(tok)  # a trailing bare ``--provider`` stays part of the model text
     return ModelFlagParseResult(model_input=" ".join(filtered).strip(), **values, **flags)
