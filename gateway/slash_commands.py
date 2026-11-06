@@ -30,6 +30,7 @@ from gateway.slash_commands_model import GatewayModelCommandsMixin
 from gateway.slash_commands_session import GatewaySessionCommandsMixin
 from gateway.slash_commands_login import GatewayLoginCommandsMixin
 from gateway.slash_commands_status import GatewayStatusCommandsMixin, history_unreadable
+from gateway.slash_commands_toolset import GatewayToolsetCommandsMixin
 from hermes_cli.config import atomic_config_write, cfg_get
 from utils import atomic_json_write, is_truthy_value
 
@@ -177,7 +178,8 @@ class GatewaySlashCommandsMixin(
     GatewayModelCommandsMixin,
     GatewaySessionCommandsMixin,
     GatewayStatusCommandsMixin,
-    GatewayGoalCommandsMixin):
+    GatewayGoalCommandsMixin,
+    GatewayToolsetCommandsMixin):
     """In-session slash-command handlers for GatewayRunner (plus the helpers the sibling mixins share)."""
 
     async_session_store: AsyncSessionStore

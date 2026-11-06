@@ -20,7 +20,7 @@ PRE_ARGPARSE_INHERITED_FLAGS: list[tuple[str, bool]] = [("--profile", True), ("-
 # test_top_level_value_flags_parity.py fails CI if the parser grows a value-taking flag this
 # snapshot lacks AND derivation regresses.
 _VALUE_FLAGS_FALLBACK: frozenset[str] = frozenset({
-    "-z", "--oneshot", "-m", "--model", "--provider", "--reasoning", "-t", "--toolsets",
+    "-z", "--oneshot", "-m", "--model", "--provider", "--reasoning", "-t", "--toolsets", "--toolset",
     "-r", "--resume", "-s", "--skills", "--usage-file", "--in", "--cpu-profile",
 })
 _OPTIONAL_VALUE_FLAGS_FALLBACK: frozenset[str] = frozenset({"-c", "--continue"})
@@ -176,6 +176,9 @@ def _add_top_level_flags(parser: argparse.ArgumentParser) -> None:
         "(or per-model under agent.reasoning_overrides)."))
     add("-t", "--toolsets", default=None,
         help="Comma-separated toolsets to enable for this invocation. Applies to -z/--oneshot and --tui.")
+    add("--toolset", metavar="NAME", default=None, help=(
+        "Activate a named toolset preset (defined under `toolset_presets:` in config.yaml) for "
+        "this invocation. Overrides the sticky active_preset."))
     add("--resume", "-r", metavar="SESSION", default=None, help=(
         "Resume a previous session by ID or title, or pass 'latest' for "
         "the most recent session (workspace-scoped, like -c with no name)"))
@@ -253,6 +256,9 @@ def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
     inherited(chat_parser, "-m", "--model", default=SUPPRESS,
               help="Model to use (e.g., anthropic/claude-sonnet-4)")
     add("-t", "--toolsets", default=SUPPRESS, help="Comma-separated toolsets to enable")
+    add("--toolset", metavar="NAME", default=SUPPRESS, help=(
+        "Activate a toolset preset (e.g. email, research). Overrides the sticky active_preset "
+        "for this invocation."))
     inherited(chat_parser, "--reasoning", default=SUPPRESS, metavar="LEVEL", help=(
         "Reasoning effort for this session: none, minimal, low, medium, "
         "high, xhigh, max, or ultra. Overrides agent.reasoning_effort for "

@@ -447,7 +447,8 @@ def _require_bypass_model(env: dict, model: Optional[str], resume_session_id: Op
 # Launch flags the Ink client cannot carry into session.create yet. Refused (exit 2, as classic
 # chat refuses unsupported flags), never dropped: a dropped --api-key/--base-url would silently
 # run the session on the profile's own endpoint and credentials.
-_TUI_UNFORWARDED = {"api_key": "--api-key", "base_url": "--base-url", "reasoning": "--reasoning"}
+_TUI_UNFORWARDED = {"api_key": "--api-key", "base_url": "--base-url", "reasoning": "--reasoning",
+                    "toolset": "--toolset"}
 
 
 def _refuse_unforwarded_tui_flags(args) -> None:
