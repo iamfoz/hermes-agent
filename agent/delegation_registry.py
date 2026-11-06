@@ -38,7 +38,7 @@ def configured_backend(config: Mapping[str, Any]) -> str:
     return lower_key(raw) if isinstance(raw, str) and raw.strip() else DEFAULT_BACKEND
 
 
-_first_use: dict[str, DelegationProvider] = {}
+_first_use: dict[str, Optional[DelegationProvider]] = {}
 
 
 class _BundledRegistrar:
@@ -71,9 +71,21 @@ def _load_bundled(name: str) -> Optional[DelegationProvider]:
     plugin_dir = get_bundled_plugins_dir() / "delegation" / name
     if not (plugin_dir / "plugin.yaml").is_file():
         return None
-    module = plugin_loader.load_plugin_module(
-        f"plugins.delegation.{name.replace('-', '_')}", plugin_dir, parents=("plugins", "plugins.delegation"),
-        logger=logger)
+    try:
+        module = plugin_loader.load_plugin_module(
+            f"plugins.delegation.{name.replace('-', '_')}", plugin_dir, parents=("plugins", "plugins.delegation"),
+            logger=logger)
+    except plugin_loader.PluginModuleLoadError as e:
+        # A bundled strategy's own import failed (missing optional dependency, ...): name it once
+        # and fall through to the next strategy - never fatal on the turn path. Memoized so the
+        # warning stays once-per-process (a later dependency install still needs a restart, like
+        # every other module load here). Delegation is bundled-only, so the fix is always
+        # `hermes pm install` (never the user-plugin "declare deps" hint).
+        _first_use[name] = None
+        logger.warning("Bundled delegation provider %r failed to load: %s", name,
+                       plugin_loader.describe_load_failure(
+                           e, repair="Run `hermes pm install` to re-sync its dependencies."))
+        return None
     if module is None:
         return None
     module.register(_BundledRegistrar(name))
