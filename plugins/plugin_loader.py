@@ -18,6 +18,38 @@ from typing import Any, Callable, List, Optional, Tuple
 
 _log = logging.getLogger(__name__)
 
+
+class _LoadFailedSentinel:
+    """Marker a category loader returns when the plugin module RAISED while importing: the cause was
+    already named at WARNING by the loader, so ``load_named`` must not add the generic "loaded but
+    no <noun> instance found" on top of it. A single instance, compared by identity (``is``), and
+    FALSY: any ``if provider:`` check degrades it to "no provider" rather than treating the sentinel
+    as a live instance (a bare None would draw the generic message, but a truthy sentinel would be
+    mistaken for a successfully-loaded provider)."""
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "LOAD_FAILED"
+
+
+LOAD_FAILED = _LoadFailedSentinel()
+
+
+class PluginModuleLoadError(ImportError):
+    """A plugin package's ``__init__.py`` raised while executing (missing dependency, syntax
+    error, ...). Raised by ``load_plugin_module`` so callers can NAME the cause at WARNING level
+    and in status output instead of reporting "loaded but no instance found" for a module that
+    never imported. An ``ImportError`` subclass so existing ``except ImportError`` handlers around
+    ``import_provider_module`` keep working. Full tracebacks stay at DEBUG (``load_plugin_module``
+    logs them)."""
+
+    def __init__(self, original: BaseException):
+        super().__init__(str(original))
+        self.original = original
+
+
 _PLUGINS_ROOT = Path(__file__).parent
 _MODULE_LOAD_LOCKS: dict[str, threading.RLock] = {}
 _MODULE_LOAD_LOCKS_GUARD = threading.Lock()
@@ -127,9 +159,12 @@ def _new_module(name: str, file: Path, search_locations: Optional[list[str]] = N
     return mod
 
 
-def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
-    """Exec a ``_new_module`` module (None -> False); False + debug-log if it raised. The sys.modules
-    entry stays on failure; callers needing a clean retry pop it themselves."""
+def _exec(mod: Any, logger: Optional[logging.Logger] = None,
+          error: Optional[Callable[[BaseException], None]] = None) -> bool:
+    """Exec a ``_new_module`` module (None -> False); False + debug-log if it raised (the traceback
+    stays at DEBUG). ``error(exc)`` receives the raised exception so a caller can surface the CAUSE
+    elsewhere - e.g. the provider's main module raises, a sibling submodule just stays quiet. The
+    sys.modules entry stays on failure; callers needing a clean retry pop it themselves."""
     if mod is None:
         return False
     try:
@@ -137,7 +172,9 @@ def _exec(mod: Any, logger: Optional[logging.Logger] = None) -> bool:
         return True
     except Exception as e:
         if logger:
-            logger.debug("Failed to exec_module %s: %s", mod.__name__, e)
+            logger.debug("Failed to exec_module %s: %s", mod.__name__, e, exc_info=True)
+        if error is not None:
+            error(e)
         return False
 
 
@@ -146,7 +183,12 @@ def load_plugin_module(module_name: str, plugin_dir: Path, *, parents: tuple[str
     """Import ``plugin_dir/__init__.py`` as *module_name* (reusing sys.modules when loaded).
     Order matters: parents first (relative imports need them), then siblings as ``module_name.<stem>``
     (so ``from ._x import Y`` resolves), then the module. Finally child is bound onto parent and
-    siblings onto module — the shape normal imports produce, which monkeypatch relies on."""
+    siblings onto module - the shape normal imports produce, which monkeypatch relies on.
+
+    Raises ``PluginModuleLoadError`` when ``__init__.py`` itself raised while executing (its
+    traceback is logged at DEBUG first). Sibling submodule failures (e.g. an optional ``cli.py``)
+    deliberately stay quieter: they are logged at DEBUG and the main module may still import
+    fine without them."""
     init_file = plugin_dir / "__init__.py"
     if not init_file.exists():
         return None
@@ -206,6 +248,7 @@ def _load_plugin_module_locked(module_name: str, plugin_dir: Path, init_file: Pa
     mod = _new_module(module_name, init_file, [str(plugin_dir)])
     if mod is None:
         return None
+    _load_error: list[BaseException] = []
     loaded_submodules = []
     for sub_file in plugin_dir.glob("*.py"):
         full_sub_name = f"{module_name}.{sub_file.stem}"
@@ -216,9 +259,9 @@ def _load_plugin_module_locked(module_name: str, plugin_dir: Path, init_file: Pa
             loaded_submodules.append((sub_file.stem, sub_mod))
         else:
             sys.modules.pop(full_sub_name, None)
-    if not _exec(mod, logger):
+    if not _exec(mod, logger, error=_load_error.append):
         sys.modules.pop(module_name, None)
-        return None
+        raise PluginModuleLoadError(_load_error[0])
     parent_name, child_name = module_name.rsplit(".", 1)
     parent_mod = sys.modules.get(parent_name)
     if parent_mod is not None:
@@ -258,11 +301,17 @@ def instance_from_module(mod: Any, *, collector: Any, collected_attr: str, base_
 
 def load_named(name: str, plugin_dir: Path, load_from_dir: Callable[[Path], Optional[Any]], *, kind: str,
                noun: str, logger: logging.Logger) -> Optional[Any]:
-    """Shared body of ``load_<kind>(name)``: load from *plugin_dir*, warn + None on failure."""
+    """Shared body of ``load_<kind>(name)``: load from *plugin_dir*, warn + None on failure. A raise
+    out of the loader (e.g. a pip entry point whose module is missing a dependency) names the cause,
+    with the dependency hint for a missing top-level import. ``LOAD_FAILED`` means the loader already
+    named the cause - return None without the generic message, which is reserved for a module that
+    imported but registered nothing."""
     try:
         instance = load_from_dir(plugin_dir)
     except Exception as e:
-        logger.warning("Failed to load %s '%s': %s", kind.lower(), name, e)
+        logger.warning("Failed to load %s '%s': %s", kind.lower(), name, describe_load_failure(e))
+        return None
+    if instance is LOAD_FAILED:
         return None
     if not instance:
         logger.warning("%s '%s' loaded but no %s instance found", kind, name, noun)
@@ -270,9 +319,50 @@ def load_named(name: str, plugin_dir: Path, load_from_dir: Callable[[Path], Opti
 
 
 def probe_availability(load: Callable[[], Optional[Any]]) -> bool:
-    """True iff *load()* returns an instance whose ``is_available()`` (if any) is truthy."""
+    """True iff *load()* returns an instance whose ``is_available()`` (if any) is truthy.
+    ``LOAD_FAILED`` (module raised while importing) counts as unavailable - it is a falsy
+    sentinel, not an instance."""
     try:
         instance = load()
-        return instance is not None and (instance.is_available() if hasattr(instance, "is_available") else True)
+        if instance is None or instance is LOAD_FAILED:
+            return False
+        return instance.is_available() if hasattr(instance, "is_available") else True
     except Exception:
         return False
+
+
+def module_missing_hint(exc: BaseException, *, repair: Optional[str] = None) -> Optional[str]:
+    """The actionable follow-up sentence for a ``ModuleNotFoundError`` raised while importing a
+    plugin module: name the missing module, say the plugin's Python dependencies are not in Hermes'
+    environment, then the supported fix. The fix depends on how the plugin is installed, so callers
+    pass it via *repair*; when omitted it is the USER-INSTALLED text (declare in ``pyproject.toml``
+    / ``plugin.yaml`` ``python_dependencies``, ``hermes plugins install`` / ``hermes pm install``)
+ - never use that default for a bundled plugin, whose deps are managed by Hermes itself.
+    None for any other exception."""
+    if not isinstance(exc, ModuleNotFoundError):
+        return None
+    missing = getattr(exc, "name", None)
+    if missing:
+        lead = (f"The plugin's Python dependencies are not in Hermes' environment (module {missing!r} "
+                "is missing).")
+    else:
+        lead = "The plugin's Python dependencies are not in Hermes' environment."
+    if repair is None:
+        repair = ("The plugin declares them in pyproject.toml / plugin.yaml `python_dependencies` "
+                  "and is installed with `hermes plugins install`; `hermes pm install` re-syncs "
+                  "them after a PM rebuild.")
+    return f"{lead} {repair}"
+
+
+def describe_load_failure(exc: BaseException, *, repair: Optional[str] = None) -> str:
+    """Why a plugin module failed to load, one WARNING-level sentence: the exception type + message
+    (plus the module path, where the exception carries one), and the dependency hint when a top-level
+    import failed on a missing module - with the fix *repair* supplies, else the user-installed text.
+    Full tracebacks stay at DEBUG."""
+    cause = exc.original if isinstance(exc, PluginModuleLoadError) else exc
+    if isinstance(cause, ModuleNotFoundError) and cause.name:
+        base = f"ModuleNotFoundError: No module named {cause.name!r}"
+    else:
+        base = f"{type(cause).__name__}: {cause}" if str(cause) else type(cause).__name__
+    hint = module_missing_hint(cause, repair=repair)
+    return f"{base}. {hint}" if hint else base

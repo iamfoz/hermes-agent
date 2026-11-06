@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from plugins import plugin_loader as _loader
 
@@ -68,8 +68,11 @@ def load_context_engine(name: str) -> Optional[ContextEngine]:
     )
 
 
-def _load_engine_from_dir(engine_dir: Path) -> Optional[ContextEngine]:
-    """Import an engine module and extract its ContextEngine (register(ctx) or subclass)."""
+def _load_engine_from_dir(engine_dir: Path) -> Any:
+    """Import an engine module and extract its ContextEngine (register(ctx) or subclass).
+    Returns the engine, None, or ``plugin_loader.LOAD_FAILED`` when the module raised while
+    importing (cause already named at WARNING); ``load_named`` translates the sentinel into a
+    quiet None."""
     from agent.context_engine import ContextEngine
     name = engine_dir.name
     is_bundled = engine_dir.parent == _CONTEXT_ENGINE_PLUGINS_DIR
@@ -79,9 +82,18 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional[ContextEngine]:
     if host is not None:
         return host.load_instance(engine_dir, module_name=module_name, capture="register_context_engine",
                                   base_ref="agent.context_engine:ContextEngine")
-    mod = _loader.load_plugin_module(
-        module_name, engine_dir, parents=("plugins", "plugins.context_engine"), logger=logger,
-        synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
+    try:
+        mod = _loader.load_plugin_module(
+            module_name, engine_dir, parents=("plugins", "plugins.context_engine"), logger=logger,
+            synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
+    except _loader.PluginModuleLoadError as e:
+        # Name the cause at WARNING and signal LOAD_FAILED (a bare None would draw the generic
+        # "no engine instance found" on top of it). Traceback at DEBUG. A bundled engine's deps are
+        # re-synced by Hermes (`hermes pm install`); a user engine declares its own (default hint).
+        repair = "Run `hermes pm install` to re-sync its dependencies." if is_bundled else None
+        logger.warning("Context engine '%s' failed to load: %s", name,
+                       _loader.describe_load_failure(e, repair=repair))
+        return _loader.LOAD_FAILED
     return mod and _loader.instance_from_module(
         mod, collector=_EngineCollector(engine_name=name), collected_attr="engine",
         base_cls=ContextEngine, name=name, logger=logger)

@@ -72,8 +72,12 @@ def resolve_memory_provider(name: str, say=None):
                 provider = load_memory_provider(name)
         # Installed (now or before) yet not loading: neither "not installed" nor an install notice explains that.
         if provider is None and find_provider_dir(name) is not None:
+            from plugins.memory import load_failure_reason
+
+            reason = load_failure_reason(name)
+            why = f" ({reason})" if reason else ""
             _warn_once(name, f"⚠ Memory provider '{name}' is installed but failed to load, so external memory is off "
-                             "for this session (built-in memory still works). The log names the error; "
+                             f"for this session (built-in memory still works){why}. "
                              "`hermes memory status` shows the plugin's state.", say=say, kind="load")
     if provider is None or provider.is_available():
         return provider

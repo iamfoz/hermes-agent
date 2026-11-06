@@ -18,7 +18,7 @@ import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Iterator, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Iterator, List, Optional, Tuple, TYPE_CHECKING
 
 from hermes_cli.config import cfg_get
 from plugins import plugin_loader as _loader
@@ -33,6 +33,10 @@ ENTRY_POINTS_GROUP = "hermes_agent.memory_providers"
 # Per Hermes home (plugin managers are per home too): pruning under one multiplexed profile must
 # only retract that profile's provider skills, never a sibling profile's.
 _REGISTERED_MEMORY_PROVIDER_SKILLS: dict[str, dict[str, Path]] = {}
+# Per Hermes home: why a provider's module failed to load this session (name -> reason). The
+# load paths log the cause once at WARNING; `hermes memory status` and agent init read it here so
+# they can say "installed, failed to load" instead of "NOT installed".
+_PROVIDER_LOAD_ERRORS: dict[str, dict[str, str]] = {}
 # Native extensions whose first import must not race another thread (#58083 warm-up).
 _NATIVE_WARM_IMPORTS: tuple[str, ...] = ("numpy",)
 
@@ -41,6 +45,36 @@ def _registered_skills_for_active_home() -> dict[str, Path]:
     from hermes_constants import hermes_home_key
 
     return _REGISTERED_MEMORY_PROVIDER_SKILLS.setdefault(hermes_home_key(), {})
+
+
+def _load_errors_for_active_home() -> dict[str, str]:
+    from hermes_constants import hermes_home_key
+
+    return _PROVIDER_LOAD_ERRORS.setdefault(hermes_home_key(), {})
+
+
+def load_failure_reason(name: str) -> Optional[str]:
+    """Why provider *name*'s module failed to load this session (exception type + message, plus
+    the dependency hint for a missing top-level import), or None when it isn't known to have failed.
+    Recorded by the load paths at WARNING; read by ``hermes memory status`` and agent init so both
+    can distinguish "installed, failed to load" from "not installed"."""
+    return _load_errors_for_active_home().get(name)
+
+
+def _record_load_failure(name: str, reason: str) -> None:
+    """Remember *reason* for this home and name the failure ONCE at WARNING (the reason stays
+    readable via ``load_failure_reason`` after the log line has scrolled away)."""
+    if _load_errors_for_active_home().get(name) == reason:
+        return
+    _load_errors_for_active_home()[name] = reason
+    logger.warning("Memory provider '%s' failed to load: %s", name, reason)
+
+
+def clear_load_failure(name: str) -> None:
+    """Forget *name*'s recorded load failure once it loads successfully: a long-running process
+    must not report a stale reason (or, conversely, suppress a later genuine recurrence - a
+    re-failure records a fresh reason, and the warn-once dedupe is per-reason, not per-name)."""
+    _load_errors_for_active_home().pop(name, None)
 
 # Synthetic parent package so user-installed providers don't collide with bundled ones.
 _USER_NAMESPACE = "_hermes_user_memory"
@@ -234,13 +268,26 @@ def load_memory_provider(name: str, *, register_skills: Optional[bool] = None) -
 
     def _load(_dir):
         if provider_dir:
+            # _load_provider_from_dir names module-load failures at WARNING and returns
+            # LOAD_FAILED for them; load_named translates that into a quiet None.
             return _load_provider_from_dir(provider_dir, register_skills=register_skills)
         from hermes_cli.plugin_isolation import in_process_import_refusal
         refusal = in_process_import_refusal(f"pip-installed memory provider {name!r}")
         if refusal:
             logger.warning("%s", refusal)
             return None
-        return _load_provider_from_entry_point(entry_point, register_skills=register_skills)
+        try:
+            provider = _load_provider_from_entry_point(entry_point, register_skills=register_skills)
+        except Exception as e:  # health: allow BLE001 -- a failing pip provider must name its cause (typically a missing dependency) and stay visible to `hermes memory status`, never crash the loader
+            # Record it (not just log it): a pip provider whose module is installed but fails to
+            # import is "installed, failed to load", NOT "NOT installed" - status reads this. Signal
+            # LOAD_FAILED (not None) so load_named stays quiet instead of adding the generic
+            # "no provider instance found" on top.
+            _record_load_failure(name, _loader.describe_load_failure(e))
+            return _loader.LOAD_FAILED
+        if provider:
+            clear_load_failure(name)
+        return provider
 
     return _loader.load_named(name, provider_dir, _load, kind="Memory provider", noun="provider", logger=logger)
 
@@ -310,6 +357,14 @@ def import_provider_module(name: str, submodule: Optional[str] = None):
     return importlib.import_module(f"{package.__name__}.{submodule}") if submodule else package
 
 
+def describe_register_failure(e: BaseException, *, repair: Optional[str] = None) -> str:
+    """Why a provider's ``register(ctx)`` failed, one line: exception type + message, plus the
+    dependency hint when it failed on a missing import."""
+    base = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+    hint = _loader.module_missing_hint(e, repair=repair)
+    return f"{base}. {hint}" if hint else base
+
+
 def _instantiate_subclass(namespace) -> Optional[MemoryProvider]:
     """First instantiable ``MemoryProvider`` subclass found among *namespace*'s attributes."""
     from agent.memory_provider import MemoryProvider
@@ -360,38 +415,78 @@ def _load_provider_from_entry_point(entry_point, *, register_skills: bool = True
     return provider
 
 
-def _load_provider_from_dir(provider_dir: Path, *, register_skills: bool = True) -> Optional[MemoryProvider]:
-    """Import a provider module; ``register(ctx)`` first, else a top-level subclass."""
+def _load_provider_from_dir(provider_dir: Path, *, register_skills: bool = True) -> Any:
+    """Import a provider module; ``register(ctx)`` first, else a top-level subclass.
+
+    Returns the provider, None, or ``plugin_loader.LOAD_FAILED`` (module raised while importing,
+    cause already named at WARNING and recorded for ``hermes memory status``); ``load_named``
+    translates the sentinel into a quiet None."""
     name = provider_dir.name
     from hermes_cli.plugin_isolation import user_plugin_host
-    host = None if _is_bundled(provider_dir) else user_plugin_host()
+    # The fix for a missing dependency depends on how this provider is installed: a bundled
+    # provider's deps are prepared by Hermes itself (`hermes memory setup <name>`); a user plugin
+    # declares its own (the loader's default hint names that). Threaded through to the reason.
+    repair = (f"Run `hermes memory setup {name}` to prepare its dependencies."
+              if _is_bundled(provider_dir) else None)
+    # Acquire the host OUTSIDE the failure handler: a failure starting the plugin host is
+    # infrastructure, not the provider's module - it must not be recorded as "provider failed to
+    # load" (and has no provider-specific repair hint).
+    host = user_plugin_host() if not _is_bundled(provider_dir) else None
     if host is not None:
-        return _ProviderCollector(name, register_skills=register_skills).collect_in_host(
-            host, provider_dir, _module_name(provider_dir, name))
-    mod = _load_package(provider_dir, name)
+        try:
+            provider = _ProviderCollector(name, register_skills=register_skills).collect_in_host(
+                host, provider_dir, _module_name(provider_dir, name))
+        except Exception as e:  # health: allow BLE001 -- the provider's module runs in the host and can raise anything; name the cause, degrade to LOAD_FAILED
+            logger.debug("Memory provider '%s' failed to load in the plugin host", name, exc_info=True)
+            _record_load_failure(name, _loader.describe_load_failure(e, repair=repair))
+            return _loader.LOAD_FAILED
+        if provider:
+            clear_load_failure(name)
+        return provider
+    try:
+        mod = _load_package(provider_dir, name)
+    except Exception as e:  # health: allow BLE001 -- a provider's own import must never take the status/agent-init path down; the import traceback is already at DEBUG in the loader
+        logger.debug("Memory provider '%s' failed to load (unexpected error type)", name, exc_info=True)
+        _record_load_failure(name, _loader.describe_load_failure(e, repair=repair))
+        return _loader.LOAD_FAILED
     if mod is None:
         return None
 
+    register_error: Optional[BaseException] = None
     if hasattr(mod, "register"):
         collector = _ProviderCollector(name, register_skills=register_skills)
         try:
             collector.collect(mod.register, source=mod.__file__)
         except Exception as e:
+            register_error = e
             # A raise AFTER register_memory_provider() must not cost us the provider:
             # falling through to the subclass scan would hand back a bare second
             # instance — a silent downgrade that looks like success.
-            if collector.provider is None:
-                logger.debug("register() failed for %s: %s", name, e)
-            else:
+            if collector.provider is not None:
                 logger.warning(
                     "Memory provider '%s' raised after registering (%s) — "
                     "using the registered provider; later registrations were skipped",
                     name, e,
                 )
+            else:
+                # The cause is named at WARNING below only if nothing stands in for the provider;
+                # the traceback stays at DEBUG either way.
+                logger.debug("register() failed for %s: %s", name, e, exc_info=True)
         if collector.provider:
+            clear_load_failure(name)
             return collector.provider
 
-    return _instantiate_subclass(mod)
+    fallback = _instantiate_subclass(mod)
+    if fallback is None and register_error is not None:
+        # register() raised BEFORE registering and no subclass stood in: name the cause once at
+        # WARNING (spec: "loaded but no provider instance found" is for a register() that ran
+        # without raising and registered nothing) and signal LOAD_FAILED so the caller stays quiet.
+        _record_load_failure(name,
+                             f"register() failed: {describe_register_failure(register_error, repair=repair)}")
+        return _loader.LOAD_FAILED
+    if fallback is not None:
+        clear_load_failure(name)
+    return fallback
 
 
 class _ProviderCollector:
