@@ -98,6 +98,7 @@ The install also ships `hermes-agent`, a minimal runner that sends one query and
 | `hermes plugins` | Manage Hermes Agent plugins (install, enable, disable, remove). |
 | `hermes portal` | Nous Portal status, subscription link, and Tool Gateway routing. See [Tool Gateway](../user-guide/features/tool-gateway.md). |
 | `hermes tools` | Configure enabled tools per platform. |
+| `hermes toolset` | List, activate, inspect, or clear [toolset presets](../user-guide/features/toolset-presets.md). |
 | `hermes computer-use` | Install or check the Computer Use (cua-driver) backend (macOS/Windows/Linux). |
 | `hermes pets` | Browse, install, and select [petdex](../user-guide/features/pets.md) animated pets shown across the CLI, TUI, and desktop app. Subcommands: `list`, `install`, `select`, `show`, `off`, `scale`, `remove`, `doctor`. |
 | `hermes sessions` | Browse, export, prune, rename, and delete sessions. |
@@ -129,6 +130,7 @@ Common options:
 | `--oneshot` | With `-q`/`--query-file`: answer the query and exit (the pre-0.21 single-query behavior) instead of seeding an interactive session. Implied on non-TTY stdio and by `-Q`. |
 | `-m`, `--model <model>` | Override the model for this run. |
 | `-t`, `--toolsets <csv>` | Enable a comma-separated set of toolsets. |
+| `--toolset <name>` | Apply a [toolset preset](../user-guide/features/toolset-presets.md) for this invocation (overrides the sticky `active_preset`). |
 | `--provider <provider>` | Force a provider: `auto`, `openrouter`, `nous`, `openai-codex` (aliases `chatgpt`, `chatgpt-codex`), `anthropic`, `gemini`, `huggingface`, `novita` (aliases `novita-ai`, `novitaai`), `openai-api`, `zai`, `kimi-coding`, `kimi-coding-cn`, `minimax`, `minimax-cn`, `minimax-oauth`, `kilocode`, `xiaomi`, `arcee`, `gmi`, `upstage` (alias `solar`), `alibaba`, `alibaba-cn`, `alibaba-coding-plan` (alias `alibaba_coding`), `alibaba-coding-plan-cn`, `alibaba-token-plan`, `alibaba-token-plan-cn`, `deepseek`, `nvidia`, `ollama-cloud`, `xai` (alias `grok`), `xai-oauth` (alias `grok-oauth`), `qwen-oauth`, `bedrock`, `opencode-zen`, `opencode-go`, `commandcode`, `commandcode-anthropic`, `ai-gateway`, `azure-foundry`, `lmstudio`, `stepfun`, `tencent-tokenhub` (alias `tencent`, `tokenhub`), `router` (aliases `ramp-router`, `ramp`), `nebius-token-factory` (aliases `nebius`, `nebius-tf`, `tokenfactory`), `tencent-tokenplan` (aliases `tokenplan`, `tencent-lkeap`). |
 | `-s`, `--skills <name>` | Preload one or more skills for the session (can be repeated or comma-separated). |
 | `-v`, `--verbose` | Verbose output. |
@@ -1720,6 +1722,17 @@ hermes tools [--summary]
 | `--summary` | Print the current enabled-tools summary and exit. |
 
 Without `--summary`, this launches the interactive per-platform tool configuration UI.
+
+## `hermes toolset`
+
+```bash
+hermes toolset list
+hermes toolset use <name>
+hermes toolset show <name>
+hermes toolset clear
+```
+
+Manages the sticky top-level `active_preset` for the [toolset presets](../user-guide/features/toolset-presets.md) defined under `toolset_presets:` in `config.yaml`. `use` makes a preset active for new CLI and gateway sessions, `show` prints its resolved toolsets and effective skills, and `clear` reverts to the default toolset. `hermes --toolset <name>` applies a preset to one invocation without persisting it.
 
 ## `hermes computer-use`
 

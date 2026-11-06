@@ -370,6 +370,110 @@ TOOL_CATEGORIES = {
 # `resolve_vision_provider_client()` — never forcing OpenRouter.
 TOOLSET_ENV_REQUIREMENTS = {"vision": [("OPENROUTER_API_KEY", "https://openrouter.ai/keys")]}
 
+# --- Toolset Presets ---
+#
+# Named bundles of (enabled_toolsets, disabled_toolsets, skills) that layer
+# on top of the per-platform tool configuration. Activated via the
+# ``/toolset <name>`` slash command, the ``--toolset <name>`` CLI flag, or
+# by setting the top-level ``active_preset`` in config.yaml (unrelated to
+# ``moa.active_preset``). Presets restrict the tool surface per task type
+# (email triage, research, writing, coding) without fragmenting memory,
+# config, or skills the way profiles do.
+#
+# Skill grouping is delegated to the skill-bundles feature
+# (``agent.skill_bundles``, ``hermes bundles``). A preset references one
+# skill bundle by name via the ``bundle:`` key; ``resolve_preset`` expands
+# that bundle's ``skills`` list and merges it with any preset-level
+# ``preload_skills`` extras (deduped, first-seen order preserved).
+#
+# Bundles answer "what skills go together?"; presets answer "what work mode
+# am I in?" (tool surface + skills + sticky mode + auto-/new). The two
+# compose: a preset names its bundle, the bundle names its skills.
+#
+# See website/docs/user-guide/features/toolset-presets.md for the spec.
+
+
+def _clean_names(raw) -> list[str]:
+    """Stripped, non-blank entries of a YAML list (anything else -> [])."""
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _preset_bundle(name: str, preset: dict):
+    """The skill bundle *preset* references, or None (no ``bundle:`` key, or unknown bundle)."""
+    bundle_name = str(preset.get("bundle") or "").strip()
+    if not bundle_name:
+        return None
+    from agent.skill_bundles import get_bundle
+    bundle = get_bundle(bundle_name)
+    if bundle is None:
+        logger.warning(
+            "Toolset preset %r references unknown skill bundle %r: the preset's tool-surface "
+            "gating still applies, but no bundle skills will be loaded. Create the bundle with "
+            "``hermes bundles create %s --skill <name> ...`` or remove the ``bundle:`` field "
+            "from the preset.", name, bundle_name, bundle_name,
+        )
+    return bundle
+
+
+def resolve_preset(name: str, cfg: dict) -> tuple[list[str] | None, list[str], list[str]]:
+    """Resolve a named preset to ``(enabled_toolsets, disabled_toolsets, skills)``.
+
+    ``enabled_toolsets`` is None when the preset sets no whitelist (``toolsets`` omitted or empty:
+    the platform config decides), else the whitelist. ``disabled_toolsets`` always applies, whitelist
+    or not. ``skills`` is the referenced bundle's skills followed by the preset's ``preload_skills``
+    extras, deduped with the first occurrence winning.
+
+    An unknown preset name returns ``(None, [], [])``; callers that want a "preset not found"
+    message check ``list_presets(cfg)`` first. An unknown bundle logs a warning and skips the bundle
+    layer: the tool surface is independently valuable, so a missing bundle never fails the preset.
+    """
+    preset = list_presets(cfg).get(name)
+    if not isinstance(preset, dict):
+        return None, [], []
+    enabled = _clean_names(preset.get("toolsets")) or None
+    disabled = _clean_names(preset.get("disabled_toolsets"))
+    bundle = _preset_bundle(name, preset)
+    bundle_skills = _clean_names(bundle.get("skills")) if bundle else []
+    skills = list(dict.fromkeys(bundle_skills + _clean_names(preset.get("preload_skills"))))
+    return enabled, disabled, skills
+
+
+def preset_bundle_instruction(name: str, cfg: dict) -> str:
+    """The ``instruction:`` text of the preset's referenced bundle, or "" (no bundle, unknown bundle,
+    or no instruction), for surfaces that preview what a preset injects at session activation."""
+    preset = list_presets(cfg).get(name)
+    if not isinstance(preset, dict) or not str(preset.get("bundle") or "").strip():
+        return ""
+    from agent.skill_bundles import get_bundle
+    bundle = get_bundle(str(preset["bundle"]).strip())
+    return str((bundle or {}).get("instruction") or "").strip()
+
+
+def list_presets(cfg: dict) -> dict[str, dict]:
+    """Return the configured presets dict, or ``{}`` when none are defined."""
+    presets = (cfg or {}).get("toolset_presets") or {}
+    return presets if isinstance(presets, dict) else {}
+
+
+def get_active_preset(cfg: dict) -> str:
+    """Return the currently active preset name, or "" if none is active."""
+    return str((cfg or {}).get("active_preset") or "").strip()
+
+
+def apply_active_preset(cfg: dict, enabled: list, disabled: list | None) -> tuple[list, list | None]:
+    """Layer the sticky ``active_preset`` over an agent run's resolved ``(enabled, disabled)``
+    toolsets: a non-empty preset whitelist replaces *enabled*, the preset's ``disabled_toolsets``
+    are merged into *disabled*. A missing or unknown preset leaves both untouched."""
+    name = get_active_preset(cfg)
+    if not name or name not in list_presets(cfg):
+        return enabled, disabled
+    preset_enabled, preset_disabled, _ = resolve_preset(name, cfg)
+    merged = list(dict.fromkeys([*(disabled or []), *preset_disabled]))
+    return (list(preset_enabled) if preset_enabled else enabled), (merged or None)
+
+
 # --- Platform / Toolset Helpers ---
 _PLATFORM_ENABLE_ENV_VARS = (
     ("telegram", "TELEGRAM_BOT_TOKEN"), ("discord", "DISCORD_BOT_TOKEN"), ("slack", "SLACK_BOT_TOKEN"),

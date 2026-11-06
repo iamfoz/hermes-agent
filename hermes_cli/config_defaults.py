@@ -28,6 +28,8 @@ DEFAULT_CONFIG = {
     "fallback": {"min_switch_reset_seconds": 0},
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    # Toolset presets (user-guide/features/toolset-presets.md); active_preset = sticky one, "" = none (not moa.active_preset)
+    "toolset_presets": {}, "active_preset": "",
     # journal_mode: SQLite journal mode for every Hermes DB. "wal" default; use "delete" on
     # weak-fsync/shared filesystems where WAL is not crash-safe (macOS virtiofs, NFS, SMB).
     "database": {
@@ -1276,9 +1278,7 @@ DEFAULT_CONFIG = {
             "keyword": "jarvis",
         },
     },
-
     "human_delay": {"mode": "off", "min_ms": 800, "max_ms": 2500},
-
     # Context engine — how the context window is managed near the token limit. "compressor" =
     # built-in lossy summarization; or a plugin name (e.g. "lcm") installed in
     # plugins/context_engine/<name>/ or ~/.hermes/plugins/.

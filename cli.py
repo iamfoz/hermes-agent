@@ -910,7 +910,6 @@ class HermesCLI(CLIBacktrackMixin, CLIInitMixin, CLITuiRuntimeMixin, CLIProcessN
                                  checkpoints, pass_session_id, ignore_rules)
         self._init_runtime_state(resume)
 
-
     def _claim_active_session(self, surface: str = "cli", *, stderr: bool = False) -> bool:
         """Claim a global active-session slot for this CLI process."""
         if self._active_session_lease is not None:
@@ -1405,7 +1404,6 @@ class HermesCLI(CLIBacktrackMixin, CLIInitMixin, CLITuiRuntimeMixin, CLIProcessN
     # #33961.)
     _DESTRUCTIVE_SKIP_TOKENS = frozenset({"now", "--yes", "-y"})
 
-
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         if not self._claim_active_session("cli"):
@@ -1675,6 +1673,7 @@ def main(
     oneshot: bool = False,
     image: str | None = None,
     toolsets: str | None = None,
+    toolset: str | None = None,
     skills: str | list[str] | tuple[str, ...] | None = None,
     model: str | None = None,
     provider: str | None = None,
@@ -1698,8 +1697,7 @@ def main(
     ignore_user_config: bool = False,
     ignore_rules: bool = False,
 ):
-    """
-    Hermes Agent CLI - Interactive AI Assistant
+    """Hermes Agent CLI - Interactive AI Assistant
     
     Args:
         query: Query to run. On a real TTY this seeds an interactive session
@@ -1724,7 +1722,7 @@ def main(
         resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
         worktree: Run in an isolated git worktree (for parallel agents). Alias: -w
         w: Shorthand for --worktree
-    
+        toolset: Toolset preset for this run (overrides the sticky active_preset)
     Examples:
         python cli.py                            # Start interactive mode
         python cli.py --toolsets web,terminal    # Use specific toolsets
@@ -1763,6 +1761,8 @@ def main(
         if not query:
             raise ValueError("--format stream-json requires -q/--query")
         quiet = True
+    from hermes_cli.toolset_cli import apply_toolset_flag
+    toolsets, skills = apply_toolset_flag(toolset, CLI_CONFIG, toolsets, skills)
     cli = _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget,
                                verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills)
 

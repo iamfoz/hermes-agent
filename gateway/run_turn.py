@@ -450,12 +450,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
         return sorted(_get_platform_tools(user_config, platform_key))
 
     def _resolve_turn_toolsets(self, user_config: dict, source: SessionSource, platform_key: str):
-        """``(enabled_toolsets, disabled_toolsets)`` for an agent run on ``source``."""
+        """``(enabled_toolsets, disabled_toolsets)`` for an agent run on ``source``; an active toolset preset layers on top."""
         from agent.skill_utils import parse_config_string_list
+        from hermes_cli.tools_config import apply_active_preset
         enabled = self._resolve_enabled_toolsets_for_source(user_config, source, platform_key)
         disabled = parse_config_string_list((user_config.get("agent") or {}).get("disabled_toolsets")) or None
-        return enabled, disabled
-
+        return apply_active_preset(user_config, enabled, disabled)
 
     def _mcp_reload_refresh_cached_agents(self, multiplex: bool, profile) -> None:
         """Refresh cached agents so existing sessions see new MCP tools on their next turn without
