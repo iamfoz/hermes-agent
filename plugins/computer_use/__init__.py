@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import Any, TYPE_CHECKING, List, Optional, Tuple
 
 from plugins import plugin_loader as _loader
 
@@ -62,16 +62,29 @@ def load_computer_use_provider(name: str) -> Optional[ComputerUseProvider]:
                               noun="provider", logger=logger)
 
 
-def _load_provider_from_dir(provider_dir: Path) -> Optional[ComputerUseProvider]:
+def _load_provider_from_dir(provider_dir: Path) -> Any:
+    """Import a provider module and extract its ComputerUseProvider (register(ctx) or subclass).
+    Returns the provider, None, or ``plugin_loader.LOAD_FAILED`` when the module raised while
+    importing (cause already named at WARNING); ``load_named`` translates the sentinel into a
+    quiet None."""
     # Providers hand back live driver sessions, so they load in-process only: load_plugin_module refuses user
     # code under ``plugins.isolation: host`` (warning + None), which surfaces as "could not be loaded".
     from tools.computer_use.backend import ComputerUseProvider
     name = provider_dir.name
     is_bundled = provider_dir.parent == _CU_PLUGINS_DIR
-    mod = _loader.load_plugin_module(
-        f"plugins.computer_use.{name}" if is_bundled else f"{_USER_NAMESPACE}.{name}", provider_dir,
-        parents=("plugins", "plugins.computer_use"), logger=logger,
-        synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
+    try:
+        mod = _loader.load_plugin_module(
+            f"plugins.computer_use.{name}" if is_bundled else f"{_USER_NAMESPACE}.{name}", provider_dir,
+            parents=("plugins", "plugins.computer_use"), logger=logger,
+            synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
+    except _loader.PluginModuleLoadError as e:
+        # Name the cause at WARNING and signal LOAD_FAILED (a bare None would draw the generic
+        # "no provider instance found" on top of it). Traceback at DEBUG. A bundled provider's deps
+        # are re-synced by Hermes (`hermes pm install`); a user provider declares its own (default).
+        repair = "Run `hermes pm install` to re-sync its dependencies." if is_bundled else None
+        logger.warning("Computer-use provider '%s' failed to load: %s", name,
+                       _loader.describe_load_failure(e, repair=repair))
+        return _loader.LOAD_FAILED
     return mod and _loader.instance_from_module(
         mod, collector=_ProviderCollector(), collected_attr="provider", base_cls=ComputerUseProvider,
         name=name, logger=logger)

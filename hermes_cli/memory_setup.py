@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import shlex
@@ -9,6 +10,8 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from hermes_cli.secret_prompt import masked_secret_prompt
+
+logger = logging.getLogger(__name__)
 
 _CANCELLED = -1
 
@@ -120,7 +123,12 @@ def _schema_of(provider) -> list:
 
 
 def _get_available_providers() -> list:
-    """Discover memory providers from plugins/memory/ as ``(name, setup_hint, provider)`` tuples."""
+    """Discover memory providers from plugins/memory/ as ``(name, setup_hint, provider)`` tuples.
+
+    A provider whose directory is installed but whose module fails to load is kept with
+    ``provider=None`` (never silently dropped): ``cmd_status`` must tell "installed, failed to
+    load" apart from "NOT installed", and the setup wizard can still offer to repair its
+    dependencies."""
     try:
         from plugins.memory import discover_memory_providers, load_memory_provider
         raw = discover_memory_providers()
@@ -131,9 +139,11 @@ def _get_available_providers() -> list:
     for name, desc, available in raw:
         try:
             provider = load_memory_provider(name)
-            if not provider:
-                continue
-        except Exception:
+        except Exception:  # health: allow BLE001 -- the status command lists ALL providers; one provider raising must degrade to a failed-to-load entry, never crash `hermes memory status`
+            logger.debug("memory provider '%s' raised while loading", name, exc_info=True)
+            provider = None
+        if not provider:
+            results.append((name, "failed to load", None))
             continue
         schema = _schema_of(provider)
         has_secrets = any(f.get("secret") for f in schema)
@@ -174,6 +184,24 @@ def _post_setup_hook(provider, config: dict) -> bool:
     return False
 
 
+def _print_failed_provider_notice(name: str) -> None:
+    """After dependency preparation, tell the user a provider could not be loaded when this setup
+    checked it: print the recorded cause (same text the load path logged and status shows), then
+    the restart + status pointer - never a plain "Activation saved", which would claim a provider
+    that cannot import is ready. The reason predates _install_dependencies: the preparation may
+    have fixed it, so the verdict is "when checked", and only a fresh load can confirm.
+    Call this only after the activation has been saved to config.yaml."""
+    from plugins.memory import load_failure_reason
+    reason = load_failure_reason(name)
+    if reason is None:
+        # No recorded cause: _install_dependencies may have just prepared the missing
+        # dependency (a restart is needed for it to take effect) - the restart is the message.
+        print(f"\n  {name} could not be loaded when checked (no cause recorded).")
+    else:
+        print(f"\n  {name} could not be loaded when checked: {reason}")
+    print("  Activation saved to config.yaml. Restart Hermes, then check `hermes memory status`.")
+
+
 def cmd_setup_provider(provider_name: str) -> None:
     """Run memory setup for a specific provider, skipping the picker."""
     from hermes_cli.config import load_config, save_config
@@ -197,6 +225,12 @@ def cmd_setup_provider(provider_name: str) -> None:
     # Fallback: generic schema-based setup (same as cmd_setup)
     config["memory"]["provider"] = name
     save_config(config)
+    if provider is None:
+        # A failed-to-load entry: don't print the plain "Activation saved" block, which would
+        # claim a provider that cannot import is ready - the notice replaces it.
+        print(f"\n  Memory provider: {name}")
+        _print_failed_provider_notice(name)
+        return
     print(f"\n  Memory provider: {name}")
     print("  Activation saved to config.yaml\n")
 
@@ -309,6 +343,11 @@ def cmd_setup(args) -> None:
     if env_writes:
         _write_env_vars(env_writes)
 
+    if provider is None:
+        # A failed-to-load entry: don't claim a provider that cannot import is ready to go.
+        print(f"\n  Memory provider: {name}")
+        _print_failed_provider_notice(name)
+        return
     print(f"\n  Memory provider: {name}")
     print("  Activation saved to config.yaml")
     if provider_config:
@@ -387,6 +426,7 @@ def cmd_status(args) -> None:
     providers = _get_available_providers()
     match = _find_provider(providers, provider_name)
     provider = match[2] if match else None
+    from plugins.memory import find_provider_dir, load_failure_reason
 
     if provider_name:
         provider_config = mem_config.get(provider_name, {})
@@ -428,18 +468,38 @@ def cmd_status(args) -> None:
                 print("  Note: systemd/gateway services do not inherit ~/.hermes/.env —")
                 print("        set any variables above in the service environment.")
         else:
-            print("\n  Plugin:    NOT installed ✗")
-            install = _catalog_install_hint(provider_name)
-            if install:
-                print(f"  Install it with: {install}")
+            reason = load_failure_reason(provider_name)
+            # "NOT installed" is true ONLY when the directory is absent. When it exists but no
+            # provider came out, it's on the "installed, failed to load" side of the line - 
+            # whether a reason was recorded or not (register() ran but registered nothing, or
+            # the plugin host failed to start, record nothing: the log carries the generic
+            # "no provider instance found" line those cases get).
+            if reason is not None:
+                # The directory is installed; its module failed to load this session. Never
+                # suggest "install it" - that would be wrong and the reason says what to do.
+                print("\n  Plugin:    installed, failed to load ✗")
+                print(f"  Reason:    {reason}")
+            elif find_provider_dir(provider_name) is not None:
+                print("\n  Plugin:    installed, failed to load ✗")
+                print("  Reason:    no provider registered (see the log)")
             else:
-                print(f"  Install the '{provider_name}' memory plugin to ~/.hermes/plugins/")
+                print("\n  Plugin:    NOT installed ✗")
+                install = _catalog_install_hint(provider_name)
+                if install:
+                    print(f"  Install it with: {install}")
+                else:
+                    print(f"  Install the '{provider_name}' memory plugin to ~/.hermes/plugins/")
 
     if providers:
         print("\n  Installed plugins:")
-        for pname, desc, _ in providers:
+        for pname, desc, prov in providers:
             active = " ← active" if pname == provider_name else ""
-            print(f"    • {pname}  ({desc}){active}")
+            # The failed marker requires a RECORDED reason: a None instance with no recorded
+            # reason is the "register() ran but registered nothing" / host-unavailable case, which
+            # the detail section explains on its own and the log line already names.
+            failed = prov is None and load_failure_reason(pname) is not None
+            label = "installed, failed to load ✗" if failed else desc
+            print(f"    • {pname}  ({label}){active}")
     print()
 
 
