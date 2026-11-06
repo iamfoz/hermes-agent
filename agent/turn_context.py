@@ -539,7 +539,10 @@ class TurnContext:
     should_review_memory: bool = False  # post-turn memory review should fire
     plugin_user_context: str = ""  # ``pre_llm_call`` context (appended to user message)
     plugin_block_message: str = ""  # ``pre_llm_call`` veto: the turn ends with this, no inference
-    ext_prefetch_cache: str = ""  # external-memory prefetch, reused across iterations
+    ext_prefetch_cache: str = ""  # API-bound external-memory context, reused across iterations
+    # ``before_prompt_build`` blocks; already folded into ``ext_prefetch_cache`` (user-turn side of the
+    # cached prefix: per-turn content never enters the byte-stable system prompt).
+    ext_system_prompt_cache: str = ""
     preflight_compression_blocked: bool = False  # immediate retry proved ineffective
 
 
@@ -1028,6 +1031,24 @@ def _memory_turn_start_and_prefetch(
     return ext_prefetch_cache
 
 
+def _memory_dynamic_prompt_block(agent: Any, original_user_message: Any) -> str:
+    """Per-turn ``before_prompt_build`` blocks from providers that override it ("" when none)."""
+    if not agent._memory_manager:
+        return ""
+    turn_state = {
+        "query": _memory_query_text(original_user_message),
+        "session_id": agent.session_id or "",
+        "parent_session_id": getattr(agent, "_parent_session_id", "") or "",
+        "turn_number": agent._user_turn_count,
+        "model": getattr(agent, "model", "") or "",
+        "platform": getattr(agent, "platform", "") or "",
+    }
+    with suppress(Exception):
+        block = agent._memory_manager.build_dynamic_system_prompt(turn_state)
+        return block if isinstance(block, str) else ""
+    return ""
+
+
 def _stamp_api_content_sidecar(
     agent: Any, messages: list[Any], current_turn_user_idx: int, ext_prefetch_cache: str,
     plugin_user_context: str, *, preflight_compressed: bool,
@@ -1297,6 +1318,11 @@ def build_turn_context(
     # A vetoed prompt never leaves the host: no external-memory prefetch, no titling call.
     ext_prefetch_cache = "" if plugin_block_message else _memory_turn_start_and_prefetch(
         agent, original_user_message, turn_author)
+    # Dynamic provider blocks join the prefetch on the current user turn (api_content sidecar /
+    # multimodal part), so the system prompt stays byte-stable and later turns replay the same bytes.
+    ext_system_prompt_cache = "" if plugin_block_message else _memory_dynamic_prompt_block(
+        agent, original_user_message)
+    ext_prefetch_cache = "\n\n".join(p for p in (ext_system_prompt_cache, ext_prefetch_cache) if p)
 
     # Title the session now: titling depends only on the user's ask (before any injected
     # context lands on list content), so it runs concurrently with the turn. Daemon thread,
@@ -1328,6 +1354,7 @@ def build_turn_context(
         current_turn_user_idx=current_turn_user_idx, should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context, plugin_block_message=plugin_block_message,
         ext_prefetch_cache=ext_prefetch_cache, preflight_compression_blocked=compaction.blocked,
+        ext_system_prompt_cache=ext_system_prompt_cache,
     )
 
 

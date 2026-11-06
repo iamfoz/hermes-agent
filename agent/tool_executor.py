@@ -1172,6 +1172,12 @@ def _commit_tool_result(
             agent.tool_progress_callback, "Tool progress",
             "tool.completed", function_name, None, None, duration=tool_duration, is_error=is_error, result=function_result,
         )
+        memory_manager = getattr(agent, "_memory_manager", None)
+        if memory_manager is not None:
+            # Inline on the agent thread (both batch paths commit here); the manager swallows provider failures.
+            memory_manager.notify_tool_call(
+                function_name, function_args, function_result, session_id=agent.session_id or "", success=not is_error,
+            )
     if isinstance(function_result, str) and len(function_result) >= _LARGE_TOOL_RESULT_TRIM_CHARS:
         agent._trim_after_tool_batch = True
     return persisted_result, function_result, tool_message.get("_tool_output_risk")
