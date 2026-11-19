@@ -441,11 +441,17 @@ def build_session_context_prompt(context: SessionContext, *, redact_pii: bool = 
             f"**Session type:** {session_label} — messages are prefixed with [sender name]. "
             "Multiple users may participate."
         )
-    elif src.user_name:
-        lines.append(f"**User:** {_format_untrusted_prompt_value(src.user_name)}")
-    elif src.user_id:
-        uid = _hash_sender_id(src.user_id) if redact_pii else src.user_id
-        lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
+    elif src.user_name or src.user_id:
+        # Display names are untrusted metadata (see the boundary note above); the
+        # numeric sender id is what the gateway authenticated against its allowlist.
+        # Expose it alongside the name so agent-side flows (e.g. approval grants)
+        # can verify identity instead of trusting a spoofable label. Stable per
+        # session, so the cached prompt prefix is unaffected. Redaction still applies.
+        if src.user_name:
+            lines.append(f"**User:** {_format_untrusted_prompt_value(src.user_name)}")
+        if src.user_id:
+            uid = _hash_sender_id(src.user_id) if redact_pii else src.user_id
+            lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
 
     lines.extend(_PLATFORM_NOTES.get(src.platform, lambda ctx: [])(context))
     platforms_list = ["local (files on this machine)"] + [

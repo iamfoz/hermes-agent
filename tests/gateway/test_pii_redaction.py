@@ -64,8 +64,11 @@ class TestBuildSessionContextPromptRedaction:
         ctx = _make_context(user_id="user-123", user_name="Alice")
         prompt = build_session_context_prompt(ctx, redact_pii=True)
         assert "Alice" in prompt
-        # user_id should not appear when user_name is present (name takes priority)
+        # The sender id is exposed alongside the name (identity for agent-side
+        # checks) but hashed under redaction, like every other id.
         assert "user-123" not in prompt
+        assert any(l.startswith("**User ID:") for l in prompt.splitlines())
+        assert "user_" in prompt  # hashed ID present
 
 
     def test_home_channel_id_preserved_without_redaction(self):
