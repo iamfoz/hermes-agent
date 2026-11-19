@@ -29,7 +29,7 @@ import os
 import sqlite3
 import sys
 import textwrap
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 from typing import Any, Dict, List, Optional, Tuple
 
 # VIPs - high priority senders
@@ -119,7 +119,7 @@ class StateStore:
                  message_data.get("sender", {}).get("emailAddress", {}).get("address", ""),
                  message_data.get("bodyPreview", ""),
                  message_data.get("bodyPreview", ""),
-                 run_id, priority, datetime.now(timezone.utc).isoformat()))
+                 run_id, priority, datetime.now(UTC).isoformat()))
             conn.commit()
 
 
@@ -238,11 +238,11 @@ def _resolve_cache_path() -> str:
 def _print_device_code(uri: str, code: str) -> None:
     """Display device code on stdout."""
     print(f"\n{'='*60}", file=sys.stderr)
-    print(f"Microsoft Authentication Required", file=sys.stderr)
+    print("Microsoft Authentication Required", file=sys.stderr)
     print(f"{'='*60}", file=sys.stderr)
     print(f"\nCode: {code}", file=sys.stderr)
     print(f"\nGo to: {uri}", file=sys.stderr)
-    print(f"and enter the code above.", file=sys.stderr)
+    print("and enter the code above.", file=sys.stderr)
     print(f"{'='*60}\n", file=sys.stderr)
 
 
@@ -268,7 +268,7 @@ async def run_device_code_auth() -> None:
     """
     print("Starting device code authentication...", file=sys.stderr)
     client = _build_graph_client()
-    token = await client.token_provider.get_access_token(force_refresh=True)
+    await client.token_provider.get_access_token(force_refresh=True)
     cache_path = _resolve_cache_path()
     print(f"✓ Authentication successful! Token cached at {cache_path}", file=sys.stderr)
     print(f"  Expires in: {client.token_provider._cached_token.expires_in_seconds}s" 
@@ -315,7 +315,7 @@ async def fetch_mailbox_delta(state_store: StateStore) -> list[dict]:
         # We capture the delta link by doing a delta query with a wide window.
         try:
             # Initial delta query creates the delta link
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             start = now.replace(year=now.year - 1).isoformat() + "Z"
             end = now.isoformat() + "Z"
             result = await client.get_json(
@@ -344,7 +344,7 @@ async def async_main() -> None:
         or "~/.hermes/workspace/exchange_mailbox.sqlite3"
     )
     state_store = StateStore(db_path)
-    run_id = datetime.now(timezone.utc).isoformat()
+    run_id = datetime.now(UTC).isoformat()
 
     try:
         messages = await fetch_mailbox_delta(state_store)
@@ -354,7 +354,7 @@ async def async_main() -> None:
         if "token" in error_str.lower() and "cache" not in error_str.lower():
             print("[AUTH_REQUIRED]", file=sys.stderr)
             print("No cached tokens found. Run with --auth to authenticate:", file=sys.stderr)
-            print(f"  python3 -m lib.exchange_mailbox --auth", file=sys.stderr)
+            print("  python3 -m lib.exchange_mailbox --auth", file=sys.stderr)
         else:
             logger.error("Mailbox sync failed: %s", exc)
             print("[ERROR]", file=sys.stderr)

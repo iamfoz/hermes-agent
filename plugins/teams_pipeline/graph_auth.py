@@ -107,7 +107,7 @@ class DelegatedGraphCredentials:
         environ: dict[str, str] | None = None,
         *,
         required: bool = True,
-    ) -> "DelegatedGraphCredentials | None":
+    ) -> DelegatedGraphCredentials | None:
         env = environ if environ is not None else os.environ
         tenant_id = (env.get("MSGRAPH_TENANT_ID") or "").strip()
         client_id = (env.get("MSGRAPH_CLIENT_ID") or "").strip()
@@ -233,7 +233,7 @@ class MicrosoftGraphTokenProvider:
                                  str(payload.get("token_type") or "Bearer").strip() or "Bearer")
 
 
-DeviceCodeCallback = Union[Callable[[str, str], Union[Coroutine[Any, Any, None], None]], Callable[[str, str], None]]
+DeviceCodeCallback = Callable[[str, str], Coroutine[Any, Any, None] | None] | Callable[[str, str], None]
 """Callback signature for displaying device code to the user.
 
 Takes (verification_uri, user_code). Can be async or sync.
@@ -278,7 +278,7 @@ class MicrosoftGraphDelegatedTokenProvider:
         cls,
         environ: dict[str, str] | None = None,
         **kwargs: Any,
-    ) -> "MicrosoftGraphDelegatedTokenProvider":
+    ) -> MicrosoftGraphDelegatedTokenProvider:
         creds = DelegatedGraphCredentials.from_env(environ)
         if creds is None:
             raise MicrosoftGraphConfigError(
@@ -371,7 +371,7 @@ class MicrosoftGraphDelegatedTokenProvider:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             return data
-        except (json.JSONDecodeError, IOError, OSError):
+        except (json.JSONDecodeError, OSError):
             return None
 
     def _load_token_from_file(self) -> CachedAccessToken | None:
@@ -399,9 +399,7 @@ class MicrosoftGraphDelegatedTokenProvider:
                 try:
                     from datetime import datetime
 
-                    dt = datetime.fromisoformat(
-                        str(expires_at_str).replace("Z", "+00:00")
-                    )
+                    dt = datetime.fromisoformat(str(expires_at_str))
                     expires_at = dt.timestamp()
                 except (ValueError, TypeError):
                     pass
@@ -441,7 +439,7 @@ class MicrosoftGraphDelegatedTokenProvider:
         if refresh_token:
             cache["refresh_token"] = refresh_token
 
-        try:
+        def _write() -> None:
             with open(path, "w") as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
                 try:
@@ -449,7 +447,10 @@ class MicrosoftGraphDelegatedTokenProvider:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             os.chmod(path, 0o600)
-        except (IOError, OSError) as exc:
+
+        try:
+            await asyncio.to_thread(_write)
+        except OSError as exc:
             raise MicrosoftGraphAuthError(
                 f"Failed to write token cache to {path}: {exc}"
             ) from exc
@@ -471,7 +472,7 @@ class MicrosoftGraphDelegatedTokenProvider:
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
             os.chmod(path, 0o600)
-        except (IOError, OSError) as exc:
+        except OSError as exc:
             raise MicrosoftGraphAuthError(
                 f"Failed to write refresh token to {path}: {exc}"
             ) from exc
