@@ -34,7 +34,7 @@ def _agent():
     # MagicMock.getattr(foo, "bar", False) returns a truthy child mock unless
     # the attribute is explicitly set to a falsy value.  The real AIAgent
     # object never auto-creates these attributes.
-    a._post_tool_empty_retried = False
+    a._post_tool_empty_retries = 0
     a._response_was_previewed = False
     return a
 

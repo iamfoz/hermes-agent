@@ -268,6 +268,37 @@ def _machinery_quiet_exit(agent: Any, assistant_message: Any, finish_reason: str
     return True
 
 
+_POST_TOOL_EMPTY_MAX_NUDGES = 2
+_TOOL_SUMMARY_PREVIEW_CHARS = 300
+
+
+def post_tool_nudge_text(attempt: int, messages: list[dict[str, Any]]) -> str:
+    """User-level hint for the *attempt*-th empty reply after tool calls. The first is the
+    static nudge; the last reinjects truncated recent tool results so a model that ignored
+    them once has something concrete to answer."""
+    from session_rules.turns import _EMPTY_TOOL_RESPONSE_NUDGE, _EMPTY_TOOL_RESPONSE_SUMMARY_NUDGE_PREFIX
+
+    if attempt < _POST_TOOL_EMPTY_MAX_NUDGES:
+        return _EMPTY_TOOL_RESPONSE_NUDGE
+    summaries = []
+    for m in messages[-10:]:
+        if m.get("role") != "tool":
+            continue
+        content = m.get("content", "")
+        preview = content[:_TOOL_SUMMARY_PREVIEW_CHARS]
+        if len(content) > _TOOL_SUMMARY_PREVIEW_CHARS:
+            preview += f" [...{len(content)} chars total]"
+        summaries.append(f"- {m.get('name', 'unknown')}: {preview}")
+    text = _EMPTY_TOOL_RESPONSE_SUMMARY_NUDGE_PREFIX + "Here's what you need to respond to:\n\n"
+    if summaries:
+        text += "Tool results:\n" + "\n".join(summaries) + "\n\n"
+    return text + (
+        "Please provide your response based on these tool results. "
+        "If you've completed the task, give your final answer. "
+        "If more work is needed, explain what's next and do it."
+    )
+
+
 def recover_empty_response(
     agent: Any, assistant_message: Any, response: Any, finish_reason: str, *, final_response: Any,
     messages: list[dict[str, Any]], api_messages: Any, conversation_history: Any,
@@ -313,23 +344,34 @@ def recover_empty_response(
         final_response = final
         return _verdict("break")
 
-    # Post-tool-call empty (no prior content, or only mid-task narration): nudge once.
+    # Post-tool-call empty (no prior content, or only mid-task narration): nudge up to
+    # _POST_TOOL_EMPTY_MAX_NUDGES times.
     _prior_was_tool = any(m.get("role") == "tool" for m in messages[-5:])
     # Ollama puts <think> in content, not reasoning_content, so _has_structured misses
     # it; detect here to route to the thinking-only reminder.
     _has_inline_thinking = bool(_INLINE_THINK_RE.search(final_response or ""))
+    _post_tool_retries = getattr(agent, "_post_tool_empty_retries", 0)
     if (
         _prior_was_tool
-        and not getattr(agent, "_post_tool_empty_retried", False)
-        and not _has_inline_thinking
+        and _post_tool_retries < _POST_TOOL_EMPTY_MAX_NUDGES
+        and not _has_inline_thinking  # thinking model still working — let prefill handle
     ):
-        agent._post_tool_empty_retried = True
+        agent._post_tool_empty_retries = _post_tool_retries = _post_tool_retries + 1
         # Clear stale narration so it doesn't resurface on a later empty response.
         agent._last_content_with_tools = None
         agent._last_content_tools_all_housekeeping = False
-        logger.info("Empty response after tool calls — nudging model " "to continue processing")
-        agent._buffer_diagnostic_status("⚠️ Model returned empty after tool calls — " "nudging to continue")
-        agent._empty_response_retry_hint = _EMPTY_TOOL_RESPONSE_NUDGE
+        logger.info(
+            "Empty response after tool calls — nudging model to continue processing (attempt %d/%d)",
+            _post_tool_retries, _POST_TOOL_EMPTY_MAX_NUDGES,
+        )
+        agent._buffer_diagnostic_status(
+            "⚠️ Model returned empty after tool calls — nudging to continue "
+            f"({_post_tool_retries}/{_POST_TOOL_EMPTY_MAX_NUDGES})"
+        )
+        # Request-only hint: no synthetic turns are persisted. The hint decorates the
+        # outgoing tail (add_empty_response_retry_hint) and response intake clears it,
+        # so a recovered tool round never replays it.
+        agent._empty_response_retry_hint = post_tool_nudge_text(_post_tool_retries, messages)
         final_response = None
         return _verdict("continue")
 
