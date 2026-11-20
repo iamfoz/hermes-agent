@@ -296,6 +296,104 @@ class CLICommandsSessionToolsMixin:
             tools_disable_enable_command(Namespace(**ns))
         _cp(*buf.getvalue().splitlines())
 
+    # ---- /toolset (toolset presets) -------------------------------------------------------
+    def _handle_toolset_command(self, cmd: str):
+        """/toolset [list|clear|show <name>|<name> [--no-new]]: switch toolset presets. Switching saves
+        the sticky ``active_preset`` and starts a fresh session (the gateway resolves the preset at
+        session creation, so the tool surface never changes mid-conversation); ``--no-new`` defers
+        that to the next /new."""
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import list_presets
+        args = _shlex_args(cmd)
+        cfg = load_config()
+        presets = list_presets(cfg)
+        sub = args[0] if args else "list"
+        if sub == "list":
+            return self._toolset_print_status(cfg, presets)
+        if sub == "show":
+            if len(args) < 2:
+                return _cp("  Usage: /toolset show <name>")
+            if args[1] not in presets:
+                return _cp(f"  {_unknown_preset(args[1], presets)}")
+            return self._toolset_print_details(args[1], presets[args[1]], cfg)
+        if sub == "clear":
+            return self._toolset_clear(cfg)
+        return self._toolset_activate(cfg, presets, sub, no_new="--no-new" in args[1:])
+
+    def _toolset_clear(self, cfg: dict) -> None:
+        from hermes_cli.tools_config import get_active_preset
+        if not get_active_preset(cfg):
+            return _cp("  No preset active.")
+        _save("active_preset", "")
+        self._toolset_new_session(None)
+        _cp("  Toolset preset cleared - default toolset active.")
+
+    def _toolset_activate(self, cfg: dict, presets: dict, name: str, *, no_new: bool) -> None:
+        from hermes_cli.tools_config import resolve_preset
+        from hermes_constants import display_hermes_home
+        if name not in presets:
+            return _cp(f"  {_unknown_preset(name, presets)}",
+                       _dim_line(f"Define presets under `toolset_presets:` in {display_hermes_home()}/config.yaml"))
+        _save("active_preset", name)
+        enabled, disabled, skills = resolve_preset(name, cfg)
+        detail = [f"    {label}: {', '.join(values)}"
+                  for label, values in (("Toolsets", enabled or []), ("Disabled", disabled), ("Skills", skills)) if values]
+        if no_new:
+            return _cp(f"  Preset {name} saved. Run /new to activate it.", *detail)
+        self._toolset_new_session(enabled)
+        _cp(f"  Preset {name} activated - fresh session started.", *detail,
+            _dim_line("Type /toolset clear to return to the default toolset."))
+
+    def _toolset_new_session(self, enabled) -> None:
+        """Rotate the session so the gateway re-resolves toolsets from the profile (now carrying the new
+        ``active_preset``); a typed ``-t`` list no longer pins it. ``enabled_toolsets`` is display only."""
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+        self._explicit_toolsets = False
+        self.enabled_toolsets = list(enabled) if enabled else sorted(_get_platform_tools(load_config(), "cli"))
+        self.new_session(silent=True)
+
+    def _toolset_print_status(self, cfg: dict, presets: dict) -> None:
+        """Print the active preset and the list of available presets."""
+        from hermes_cli.tools_config import get_active_preset
+        from hermes_constants import display_hermes_home
+        active = get_active_preset(cfg)
+        _cp(f"  Active preset: {active}" if active else "  Active preset: (none - default toolset)")
+        if not presets:
+            return _cp(_dim_line(f"No presets defined. Add them under `toolset_presets:` in {display_hermes_home()}/config.yaml."))
+        _cp("")
+        for name, preset in presets.items():
+            if not isinstance(preset, dict):
+                continue
+            marker = "*" if name == active else " "
+            desc = preset.get("description", "")
+            tools_str = ", ".join(preset.get("toolsets") or []) or "default toolset"
+            _cp(f"  {marker} {name} - {desc} ({tools_str})" if desc else f"  {marker} {name} ({tools_str})")
+        _cp("", _dim_line("/toolset <name> to switch (auto-starts new session)"),
+            _dim_line("/toolset <name> --no-new to switch without new session"),
+            _dim_line("/toolset clear to deactivate"))
+
+    def _toolset_print_details(self, name: str, preset: dict, cfg: dict) -> None:
+        """Print the resolved fields of a single preset (skills through the same resolver activation uses)."""
+        from hermes_cli.tools_config import preset_bundle_instruction, resolve_preset
+        tools = preset.get("toolsets") or []
+        disabled = preset.get("disabled_toolsets") or []
+        extras = preset.get("preload_skills") or []
+        _, _, effective_skills = resolve_preset(name, cfg)
+        instruction = preset_bundle_instruction(name, cfg)
+        _cp(f"  Preset: {name}")
+        if preset.get("description"):
+            _cp(f"  Description: {preset['description']}")
+        _cp(f"  Toolsets: {', '.join(tools) if tools else 'default'}",
+            f"  Disabled: {', '.join(disabled) if disabled else '(none)'}",
+            f"  Bundle: {str(preset.get('bundle') or '').strip() or '(none)'}")
+        if extras:
+            _cp(f"  Extra skills: {', '.join(extras)}")
+        _cp(f"  Effective skills: {', '.join(effective_skills) if effective_skills else '(none)'}")
+        if instruction:
+            first_line = instruction.splitlines()[0]
+            _cp(f"  Bundle instruction: {first_line}{'' if first_line == instruction else ' [...]'}")
+
     def _handle_autoprune_command(self, cmd: str):
         """/autoprune [on|off|later|status] — the low-disk auto-prune decision."""
         from hermes_cli.slash_exec import CommandContext, execute_command
@@ -398,6 +496,11 @@ def _command_arg(cmd: str, *, lower: bool = False) -> str:
     parts = (cmd or "").strip().split(None, 1)
     arg = parts[1].strip() if len(parts) > 1 else ""
     return arg.lower() if lower else arg
+
+
+def _unknown_preset(name: str, presets: dict) -> str:
+    available = ", ".join(presets) if presets else "(none defined)"
+    return f"Unknown preset '{name}'. Available: {available}"
 
 
 def _shlex_args(cmd: str) -> list:
