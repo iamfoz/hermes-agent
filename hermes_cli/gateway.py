@@ -68,12 +68,13 @@ from hermes_cli.setup import (
     prompt_yes_no,
 )
 from hermes_cli.colors import Colors, color
-from hermes_cli.gateway_profile_lifecycle import owned_gateway_pid as _owned_gateway_pid
+from hermes_cli.gateway_profile_lifecycle import mark_planned_stop as _mark_planned_stop, owned_gateway_pid as _owned_gateway_pid
 # Module level on purpose: the update's restart watcher runs after the checkout moved, when a lazy
 # import would load the REPLACEMENT tree (tests/hermes_cli/test_update_post_swap_imports.py).
 from hermes_cli.gateway_restart_env import restart_watcher_env
 from hermes_cli.gateway_bundled_env import systemd_env_line as _systemd_env_line
 from hermes_cli.gateway_restart_watcher import watcher_source
+from hermes_cli.gateway_restart_output import _restart_with_output_guard
 logger = logging.getLogger(__name__)
 
 # Shared ``subprocess.run`` kwargs for text-mode probes (stdout/stderr captured, decode-tolerant).
@@ -1270,7 +1271,7 @@ def _wait_for_systemd_service_restart(
                     runtime_state = None
             gateway_state = (runtime_state or {}).get("gateway_state")
             if gateway_state in ("running", "degraded"):
-                print(f"✓ {scope_label} service restarted (PID {new_pid})")
+                print(f"✓ {scope_label} service restarted (PID {new_pid})", flush=True)
                 if gateway_state == "degraded":
                     # Serving, but a configured platform is parked or retrying: a real restart, not a
                     # failure — say so instead of waiting out the timeout and reporting one.
@@ -1886,9 +1887,6 @@ def _force_kill_survivors(survivors, *, kill=None) -> None:
         )
         with contextlib.suppress((ProcessLookupError, PermissionError, OSError)):
             kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
-
-
-from hermes_cli.gateway_profile_lifecycle import mark_planned_stop as _mark_planned_stop
 
 
 def stop_profile_gateway() -> bool:
@@ -5565,7 +5563,8 @@ def _cmd_migrate(args):
 
 _GATEWAY_SUBCOMMANDS = {
     None: _cmd_run, "run": _cmd_run, "setup": _cmd_setup, "install": _cmd_install,
-    "uninstall": _cmd_uninstall, "start": _cmd_start, "stop": _cmd_stop, "restart": _cmd_restart,
+    "uninstall": _cmd_uninstall, "start": _cmd_start, "stop": _cmd_stop,
+    "restart": _restart_with_output_guard,
     "status": _cmd_status, "list": _cmd_list, "migrate-legacy": _cmd_migrate_legacy, "migrate": _cmd_migrate,
 }
 
